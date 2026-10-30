@@ -19,8 +19,6 @@ defaults
     log     global
     mode    tcp
     option  dontlognull
-    option  tcp-smart-accept
-    option  tcp-smart-connect
     timeout connect 10s
     timeout client  4h
     timeout server  4h
@@ -33,11 +31,11 @@ frontend fe_http_80
     tcp-request inspect-delay 5s
 
     acl is_raw_ssh   payload(0,4) -m bin 5353482d
-    acl is_acme     payload(0,256) -m sub /.well-known/acme-challenge/
-    acl is_xray_ws  payload(0,256) -m sub /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
+    acl is_acme      payload(0,256) -m sub /.well-known/acme-challenge/
+    acl is_xray_ws   payload(0,256) -m sub /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
+    acl is_http_80   payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
-    tcp-request content accept if is_raw_ssh or is_acme or is_xray_ws
-    tcp-request content accept if HTTP
+    tcp-request content accept if is_raw_ssh or is_acme or is_xray_ws or is_http_80
     tcp-request content accept
 
     use_backend be_dropbear  if is_raw_ssh

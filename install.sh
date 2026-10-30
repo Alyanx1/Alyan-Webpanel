@@ -9,8 +9,10 @@
 set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
 ALYAN_VERSION="1.0.0"
-REPO_RAW_URL="${ALYAN_REPO_RAW:-https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main}"
+REPO_SLUG="${ALYAN_REPO_SLUG:-Alyanx1/Alyan-Webpanel}"
+REPO_RAW_URL="${ALYAN_REPO_RAW:-https://raw.githubusercontent.com/${REPO_SLUG}/main}"
 INSTALL_DIR="/opt/alyan"
 ETC_DIR="/etc/alyan"
 VAR_DIR="/var/lib/alyan"
@@ -83,10 +85,10 @@ run_task() {
     sleep 0.14
   done
   if wait "$pid"; then
-    printf "\r${C_ORG}┃ ${C_OK}✔ ${C_RED}%s${C_GRY}%s ${C_AMB}%3d%% ${C_WHT}%-44s${C_RST}\n" \
+    printf "\r${C_ORG}┃ ${C_OK}✔ ${C_RED}%s${C_GRY}%s ${C_AMB}%3d%% ${C_WHT}%-46s${C_RST}\n" \
       "$bar_f" "$bar_e" "$pct" "$label"
   else
-    printf "\r${C_ORG}┃ ${C_ERR}✖ ${C_RED}%s${C_GRY}%s ${C_ERR}ERR  ${C_WHT}%-44s${C_RST}\n" \
+    printf "\r${C_ORG}┃ ${C_ERR}✖ ${C_RED}%s${C_GRY}%s ${C_ERR}ERR  ${C_WHT}%-46s${C_RST}\n" \
       "$bar_f" "$bar_e" "$label"
     echo -e "${C_ERR}Task failed! Last 20 lines of ${LOG_FILE}:${C_RST}"
     tail -n 20 "$LOG_FILE" || true
@@ -119,6 +121,7 @@ preflight_check() {
 }
 
 # ─── Helper: Fetch File from Local Bundle or Remote GitHub Repo ──────────────
+BUNDLE_DIR=""
 fetch_asset() {
   local rel="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
@@ -128,8 +131,12 @@ fetch_asset() {
   fi
   if [[ -n "$script_dir" && -f "${script_dir}/${rel}" ]]; then
     cp -f "${script_dir}/${rel}" "$dst"
+  elif [[ -n "$BUNDLE_DIR" && -f "${BUNDLE_DIR}/${rel}" ]]; then
+    cp -f "${BUNDLE_DIR}/${rel}" "$dst"
   elif [[ -n "${ALYAN_GH_TOKEN:-}" ]]; then
-    curl -fsSL -H "Authorization: token ${ALYAN_GH_TOKEN}" "${REPO_RAW_URL}/${rel}" -o "$dst"
+    curl -fsSL -H "Authorization: Bearer ${ALYAN_GH_TOKEN}" "${REPO_RAW_URL}/${rel}" -o "$dst" || \
+    curl -fsSL -H "Authorization: token ${ALYAN_GH_TOKEN}" "${REPO_RAW_URL}/${rel}" -o "$dst" || \
+    curl -fsSL -u "x-access-token:${ALYAN_GH_TOKEN}" "${REPO_RAW_URL}/${rel}" -o "$dst"
   else
     curl -fsSL "${REPO_RAW_URL}/${rel}" -o "$dst"
   fi
@@ -154,7 +161,7 @@ section_hdr "1/5" "Igniting Base System & Core Dependencies"
 run_task 8  "Refreshing APT package repositories" apt-get update -y
 run_task 20 "Installing networking, TLS & build utilities" \
   apt-get install -y --no-install-recommends \
-  curl wget jq socat cron ca-certificates gnupg lsb-release unzip tar \
+  git curl wget jq socat cron ca-certificates gnupg lsb-release unzip tar \
   openssl sqlite3 lsof iproute2 procps bc vnstat dnsutils
 run_task 32 "Installing Python 3 runtime & virtual environment" \
   apt-get install -y --no-install-recommends python3 python3-venv python3-pip
@@ -213,6 +220,23 @@ run_task 44 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_
 
 deploy_project_files() {
   mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,qos,systemd},templates}
+
+  # If running from curl pipe (not a local git folder), clone bundle once cleanly
+  local local_check=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    local_check="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
+  if [[ -z "$local_check" || ! -f "${local_check}/core/alyan-ctl" ]]; then
+    BUNDLE_DIR="/tmp/alyan-bundle-src"
+    rm -rf "$BUNDLE_DIR"
+    if [[ -n "${ALYAN_GH_TOKEN:-}" ]]; then
+      git clone --depth 1 "https://x-access-token:${ALYAN_GH_TOKEN}@github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || \
+      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
+    else
+      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
+    fi
+  fi
+
   fetch_asset "install.sh"                       "${INSTALL_DIR}/install.sh" || true
   fetch_asset "core/alyan-ctl"                   "${INSTALL_DIR}/core/alyan-ctl"
   fetch_asset "services/wsd/alyan-wsd.py"        "${INSTALL_DIR}/services/wsd/alyan-wsd.py"
@@ -231,17 +255,19 @@ deploy_project_files() {
   for unit in alyan-wsd alyan-guard alyan-qos alyan-panel alyan-bot; do
     fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
   done
-  chmod +x "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/qos/alyan-qos.sh"
+  rm -rf "/tmp/alyan-bundle-src"
+  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/qos/alyan-qos.sh" 2>/dev/null || true
   ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
   ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
 }
 run_task 54 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files
 
 install_xray_core() {
-  mkdir -p /usr/local/bin /usr/local/etc/xray /var/log/xray
+  mkdir -p /usr/local/bin /usr/local/share/xray /usr/local/etc/xray /var/log/xray
   local tmp_zip="/tmp/xray.zip"
   curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip" -o "$tmp_zip"
   unzip -qo "$tmp_zip" xray geoip.dat geosite.dat -d /usr/local/bin/
+  cp -f /usr/local/bin/geoip.dat /usr/local/bin/geosite.dat /usr/local/share/xray/ 2>/dev/null || true
   chmod +x /usr/local/bin/xray
   rm -f "$tmp_zip"
   cat >/etc/systemd/system/xray.service <<'UNIT'
@@ -264,8 +290,9 @@ run_task 66 "Installing Xray-Core (VLESS · VMess · Trojan · XHTTP)" install_x
 
 setup_panel_venv() {
   id -u alyan &>/dev/null || useradd -r -s /usr/sbin/nologin -d /opt/alyan alyan
+  chown -R alyan:alyan "${INSTALL_DIR}/panel" "${INSTALL_DIR}/bot"
   cat >/etc/sudoers.d/alyan-panel <<'SUDO'
-alyan ALL=(root) NOPASSWD: /usr/local/bin/alyan-ctl *
+alyan ALL=(root) NOPASSWD: /usr/local/bin/alyan-ctl, /usr/local/bin/alyan-ctl *
 SUDO
   chmod 0440 /etc/sudoers.d/alyan-panel
   python3 -m venv "${INSTALL_DIR}/venv"

@@ -308,6 +308,8 @@ def render_all_configs(conn: sqlite3.Connection, reload_daemons: bool = False):
     hap_tpl = TPL_DIR / "haproxy.cfg.tpl"
     if hap_tpl.exists():
         Path("/etc/haproxy").mkdir(parents=True, exist_ok=True)
+        Path("/var/lib/haproxy").mkdir(parents=True, exist_ok=True)
+        Path("/run/haproxy").mkdir(parents=True, exist_ok=True)
         Path("/etc/haproxy/haproxy.cfg").write_text(
             hap_tpl.read_text(encoding="utf-8").replace("{{DOMAIN}}", domain),
             encoding="utf-8",
