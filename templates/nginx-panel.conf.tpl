@@ -2,6 +2,11 @@
 #  🔥 ALYAN WEBPANEL — Custom Port HTTPS Reverse Proxy
 #  Domain: {{DOMAIN}} · Port: {{PANEL_PORT}} -> FastAPI 127.0.0.1:7700
 # ═════════════════════════════════════════════════════════════════════════════
+upstream alyan_panel_backend {
+    server 127.0.0.1:7700;
+    keepalive 32;
+}
+
 server {
     listen 0.0.0.0:{{PANEL_PORT}} ssl http2;
     server_name {{DOMAIN}} _;
@@ -13,6 +18,11 @@ server {
     ssl_session_cache   shared:AlyanPanelSSL:10m;
     ssl_session_timeout 1d;
 
+    tcp_nodelay on;
+    gzip on;
+    gzip_types application/json application/javascript text/css text/plain image/svg+xml;
+    gzip_min_length 512;
+
     # Redirect plain HTTP sent to HTTPS port automatically cleanly
     error_page 497 https://$host:{{PANEL_PORT}}$request_uri;
 
@@ -23,14 +33,14 @@ server {
     client_max_body_size 16m;
 
     location / {
-        proxy_pass http://127.0.0.1:7700;
+        proxy_pass http://alyan_panel_backend;
         proxy_http_version 1.1;
+        proxy_buffering off;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection "";
         proxy_read_timeout 120s;
     }
 }

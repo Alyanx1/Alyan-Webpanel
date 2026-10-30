@@ -16,13 +16,13 @@
   "policy": {
     "levels": {
       "0": {
-        "handshake": 4,
-        "connIdle": 300,
+        "handshake": 6,
+        "connIdle": 600,
         "uplinkOnly": 2,
         "downlinkOnly": 5,
         "statsUserUplink": true,
         "statsUserDownlink": true,
-        "bufferSize": 512
+        "bufferSize": 4096
       }
     },
     "system": {
@@ -55,6 +55,10 @@
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-vless"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -70,6 +74,10 @@
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-vmess"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -85,6 +93,10 @@
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-trojan"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -101,6 +113,10 @@
         "network": "grpc",
         "grpcSettings": {
           "serviceName": "alyan-vless-grpc"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -116,6 +132,10 @@
         "network": "grpc",
         "grpcSettings": {
           "serviceName": "alyan-vmess-grpc"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -131,6 +151,10 @@
         "network": "grpc",
         "grpcSettings": {
           "serviceName": "alyan-trojan-grpc"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     },
@@ -146,6 +170,9 @@
         "network": "tcp",
         "tcpSettings": {
           "acceptProxyProtocol": true
+        },
+        "sockopt": {
+          "tcpNoDelay": true
         }
       }
     },
@@ -162,6 +189,10 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/alyan-xhttp"
+        },
+        "sockopt": {
+          "tcpNoDelay": true,
+          "trustedXForwardedFor": ["127.0.0.1", "::1"]
         }
       }
     }
@@ -172,6 +203,13 @@
       "protocol": "freedom",
       "settings": {
         "domainStrategy": "UseIP"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "tcpFastOpen": true,
+          "tcpNoDelay": true,
+          "tcpKeepAliveIdle": 60
+        }
       }
     },
     {

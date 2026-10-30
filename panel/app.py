@@ -31,6 +31,10 @@ LOGIN_FAILURES: dict[str, list[float]] = {}
 MAX_FAILURES = 8
 FAIL_WINDOW = 300.0
 
+# Lightweight read coalescing cache (1.2s TTL, cleared immediately on any mutation)
+READ_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+READ_CACHE_TTL = 1.2
+
 
 def load_or_create_secret() -> bytes:
     try:
@@ -236,32 +240,41 @@ async def api_auth_logout(request: Request, response: Response):
     return {"ok": True}
 
 
+async def cached_ctl_read(cache_key: str, subcmd: list[str], actor: str, ip: str) -> dict[str, Any]:
+    now = time.monotonic()
+    hit = READ_CACHE.get(cache_key)
+    if hit and (now - hit[0]) < READ_CACHE_TTL:
+        return hit[1]
+    data = await run_ctl(subcmd, actor=actor, ip=ip)
+    READ_CACHE[cache_key] = (time.monotonic(), data)
+    return data
+
+
+def invalidate_read_cache():
+    READ_CACHE.clear()
+
+
 # ─── Core & Telemetry Routes ─────────────────────────────────────────────────
 @app.get("/api/overview")
 async def api_overview(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["overview"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read(f"ov:{sess['username']}", ["overview"], sess["username"], client_ip(request))
 
 
 @app.get("/api/telemetry")
 async def api_telemetry(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["telemetry"], actor=sess["username"], ip=client_ip(request))
-
-
-@app.post("/api/speedtest")
-async def api_speedtest(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["speedtest"], actor=sess["username"], ip=client_ip(request), timeout=65.0)
+    return await cached_ctl_read(f"ov:{sess['username']}", ["telemetry"], sess["username"], client_ip(request))
 
 
 # ─── SSH Accounts Routes ─────────────────────────────────────────────────────
 @app.get("/api/ssh")
 async def api_ssh_list(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["ssh-list"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read(f"ssh:{sess['username']}", ["ssh-list"], sess["username"], client_ip(request))
 
 
 @app.post("/api/ssh")
 async def api_ssh_create(request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(
+    res = await run_ctl(
         [
             "ssh-add",
             "--username", str(b.get("username") or ""),
@@ -273,33 +286,39 @@ async def api_ssh_create(request: Request, sess: dict = Depends(require_session)
         actor=sess["username"],
         ip=client_ip(request),
     )
+    invalidate_read_cache()
+    return res
 
 
 @app.patch("/api/ssh/{username}")
 async def api_ssh_edit(username: str, request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(
+    res = await run_ctl(
         ["ssh-edit", "--username", username, "--json", json.dumps(b)],
         actor=sess["username"],
         ip=client_ip(request),
     )
+    invalidate_read_cache()
+    return res
 
 
 @app.delete("/api/ssh/{username}")
 async def api_ssh_delete(username: str, request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["ssh-del", "--username", username], actor=sess["username"], ip=client_ip(request))
+    res = await run_ctl(["ssh-del", "--username", username], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
 
 
 # ─── Xray Matrix Routes ──────────────────────────────────────────────────────
 @app.get("/api/xray")
 async def api_xray_list(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["xray-list"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read(f"xray:{sess['username']}", ["xray-list"], sess["username"], client_ip(request))
 
 
 @app.post("/api/xray")
 async def api_xray_create(request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(
+    res = await run_ctl(
         [
             "xray-add",
             "--username", str(b.get("username") or ""),
@@ -312,27 +331,33 @@ async def api_xray_create(request: Request, sess: dict = Depends(require_session
         actor=sess["username"],
         ip=client_ip(request),
     )
+    invalidate_read_cache()
+    return res
 
 
 @app.patch("/api/xray/{uuid}")
 async def api_xray_edit(uuid: str, request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(
+    res = await run_ctl(
         ["xray-edit", "--uuid", uuid, "--json", json.dumps(b)],
         actor=sess["username"],
         ip=client_ip(request),
     )
+    invalidate_read_cache()
+    return res
 
 
 @app.delete("/api/xray/{uuid}")
 async def api_xray_delete(uuid: str, request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["xray-del", "--uuid", uuid], actor=sess["username"], ip=client_ip(request))
+    res = await run_ctl(["xray-del", "--uuid", uuid], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
 
 
 # ─── Engine, Daemons & Ports Routes ──────────────────────────────────────────
 @app.get("/api/engine")
 async def api_engine(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["engine"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read("engine", ["engine"], sess["username"], client_ip(request))
 
 
 @app.get("/api/service/{svc_id}/logs")
@@ -344,19 +369,23 @@ async def api_service_logs(svc_id: str, request: Request, sess: dict = Depends(r
 async def api_service_action(svc_id: str, action: str, request: Request, sess: dict = Depends(require_session)):
     if action not in ("start", "stop", "restart"):
         raise HTTPException(status_code=400, detail="Unsupported service action")
-    return await run_ctl(["service", svc_id, action], actor=sess["username"], ip=client_ip(request))
+    res = await run_ctl(["service", svc_id, action], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
 
 
 # ─── Settings, Telegram, Admins & Activity List Routes ───────────────────────
 @app.post("/api/settings")
 async def api_settings(request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(
+    res = await run_ctl(
         ["settings", "--json", json.dumps(b)],
         actor=sess["username"],
         ip=client_ip(request),
         timeout=90.0,
     )
+    invalidate_read_cache()
+    return res
 
 
 @app.post("/api/telegram/test")
@@ -366,23 +395,27 @@ async def api_telegram_test(request: Request, sess: dict = Depends(require_sessi
 
 @app.get("/api/admins")
 async def api_admins_list(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["admin-list"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read(f"adm:{sess['username']}", ["admin-list"], sess["username"], client_ip(request))
 
 
 @app.post("/api/admins")
 async def api_admins_create(request: Request, sess: dict = Depends(require_session)):
     b = await request.json()
-    return await run_ctl(["admin-add", "--json", json.dumps(b)], actor=sess["username"], ip=client_ip(request))
+    res = await run_ctl(["admin-add", "--json", json.dumps(b)], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
 
 
 @app.delete("/api/admins/{username}")
 async def api_admins_delete(username: str, request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["admin-del", "--username", username], actor=sess["username"], ip=client_ip(request))
+    res = await run_ctl(["admin-del", "--username", username], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
 
 
 @app.get("/api/audit")
 async def api_audit(request: Request, sess: dict = Depends(require_session)):
-    return await run_ctl(["audit-list"], actor=sess["username"], ip=client_ip(request))
+    return await cached_ctl_read(f"aud:{sess['username']}", ["audit-list"], sess["username"], client_ip(request))
 
 
 # ─── Static UI Shell Routes ──────────────────────────────────────────────────

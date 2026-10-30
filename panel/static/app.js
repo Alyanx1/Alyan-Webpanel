@@ -425,8 +425,7 @@
       cpu_model: 'AMD EPYC 7713 64-Core · 2 vCPU',
       uptime: '6d 19h 42m',
       ws_path: '/alyan',
-      banner: '<font color="#ff3b1f"><b>🔥 ALYAN WEBPANEL PREMIUM TUNNEL 🔥</b></font><br><font color="#ffb000">No Torrent · No DDoS · Gaming Low-Ping Ready</font>',
-      qos: { enabled: true, iface: 'eth0', bw_mbps: 500, preset: 'gaming', caps: [{ ip: '10.8.0.14', mbps: 25 }] },
+      banner: '<font color="#ff3b1f"><b>🔥 ALYAN WEBPANEL PREMIUM TUNNEL 🔥</b></font><br><font color="#ffb000">No Torrent · No DDoS · Wire-Speed BBR Ready</font>',
       bot: { enabled: true, token: '781204****:AAH9f_alyan_bot_secret', admin_id: '591031001', alerts: true }
     },
     ssh: [
@@ -446,7 +445,6 @@
       { id: 'alyan-wsd', name: 'Alyan WS-Proxy', desc: 'GET /alyan 101 + Real-IP Bridge', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '9.8 MB', pid: 67297 },
       { id: 'xray', name: 'Xray-Core Engine', desc: 'VMess · VLESS · Trojan · XHTTP', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '24.6 MB', pid: 68466 },
       { id: 'alyan-guard', name: 'Alyan Guard', desc: 'GB Quota · Expiry · IP Enforcer', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '11.2 MB', pid: 68115 },
-      { id: 'alyan-qos', name: 'Ping', desc: 'Low Latency Stability', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '—', pid: 0 },
       { id: 'alyan-bot', name: 'Telegram Bot', desc: 'Full User & Server Control', status: 'running', boot: 'enabled', uptime: '2d 11h', mem: '16.5 MB', pid: 69102 },
       { id: 'alyan-panel', name: 'Alyan Webpanel', desc: 'FastAPI Command Deck', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '28.1 MB', pid: 69447 }
     ],
@@ -473,7 +471,7 @@
       { time: '03:54:12', user: 'admin', action: 'xray_links', detail: 'proto=vless user=AlyanVIP', ip: '59.103.100.171' },
       { time: '03:41:08', user: 'admin', action: 'ssh_create', detail: 'user=Alyan days=30 gb=50 ip=2 path=/alyan', ip: '59.103.100.171' },
       { time: '03:28:49', user: 'reseller1', action: 'ssh_create', detail: 'user=ZainGaming days=14 gb=20 ip=1', ip: '119.160.64.11' },
-      { time: '03:15:02', user: 'admin', action: 'ping_apply', detail: 'iface=eth0 bw=500Mbit preset=gaming', ip: '59.103.100.171' },
+      { time: '03:15:02', user: 'admin', action: 'stack_repair', detail: 'Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy + Xray tuned', ip: '59.103.100.171' },
       { time: '02:59:30', user: 'admin', action: 'ssl_issue', detail: 'domain=panel.alyan08.com valid=89d', ip: 'local' }
     ],
     hist: {
@@ -481,8 +479,7 @@
       ram: [22, 22, 23, 23, 24, 24, 23, 25, 24, 24, 25, 25, 24, 24, 25, 26, 25, 25, 24, 25],
       rx:  [1.2, 2.4, 3.8, 5.1, 4.2, 6.8, 8.4, 7.1, 5.5, 9.2, 11.4, 8.0, 6.2, 7.9, 10.3, 12.6, 9.4, 8.1, 11.2, 9.8],
       tx:  [0.9, 1.8, 2.9, 4.4, 3.9, 5.2, 6.1, 5.8, 4.9, 7.4, 8.8, 6.5, 5.1, 6.4, 8.2, 9.7, 7.8, 6.9, 8.9, 7.6]
-    },
-    speedtest: { ping: 4.8, jitter: 0.6, down: 942.6, up: 886.4, isp: 'Singtel Fiber IX', ran: 'Last test · Singapore' }
+    }
   };
 
   function logDemo(action, detail) {
@@ -616,21 +613,12 @@
       if (id === 'all') DEMO.services.forEach(x => { x.status = 'running'; });
       return { ok: true, services: DEMO.services };
     }
-    if (path === '/telemetry') return Object.assign(demoOverview(), { speedtest: DEMO.speedtest });
-    if (path === '/speedtest' && opts.method === 'POST') {
-      await new Promise(r => setTimeout(r, 850));
-      DEMO.speedtest = { ping: +(3.4 + Math.random() * 4).toFixed(1), jitter: +(0.3 + Math.random() * 0.9).toFixed(1), down: +(820 + Math.random() * 160).toFixed(1), up: +(760 + Math.random() * 170).toFixed(1), isp: 'Akamai / Linode IX', ran: 'Just now' };
-      logDemo('speedtest', `down=${DEMO.speedtest.down}Mbps`);
-      return DEMO.speedtest;
-    }
+    if (path === '/telemetry') return demoOverview();
     if (path === '/settings' && opts.method === 'POST') {
       if (b.domain) { DEMO.cfg.domain = b.domain.trim(); logDemo('domain_set', DEMO.cfg.domain); }
       if (b.panel_port) { DEMO.cfg.panel_port = +b.panel_port; const p = DEMO.ports.find(x => x.note.includes('Webpanel')); if (p) p.port = DEMO.cfg.panel_port; logDemo('port_set', `port=${DEMO.cfg.panel_port}`); }
       if (b.ssl_renew) { DEMO.cfg.ssl_days = 90; logDemo('ssl_renew', DEMO.cfg.domain); }
       if (b.banner !== undefined) { DEMO.cfg.banner = b.banner; logDemo('banner_set', `${b.banner.length} bytes`); }
-      if (b.qos) { Object.assign(DEMO.cfg.qos, b.qos); logDemo('ping_apply', `${DEMO.cfg.qos.iface} @ ${DEMO.cfg.qos.bw_mbps}M`); }
-      if (b.add_cap) { DEMO.cfg.qos.caps.push(b.add_cap); logDemo('ping_cap_add', `${b.add_cap.ip}=${b.add_cap.mbps}M`); }
-      if (b.del_cap !== undefined) DEMO.cfg.qos.caps.splice(b.del_cap, 1);
       if (b.bot) { Object.assign(DEMO.cfg.bot, b.bot); logDemo('bot_config', `enabled=${DEMO.cfg.bot.enabled}`); }
       if (b.new_password) logDemo('password_change', `user=${DEMO.me.username}`);
       if (b.maint) logDemo('maintenance', b.maint);
@@ -1311,13 +1299,13 @@
   }
 
 
-  /* ═════════════════════ 4. ENGINE (Services & Listening Ports · Ping · 2s Sync) ═════════════════════ */
+  /* ═════════════════════ 4. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
   async function renderEngine() {
     let engBusy = false;
     setBayHead(
       'DAEMONS & PORTS',
       'Engine',
-      'HAProxy · Nginx · Dropbear · WS-Proxy · Xray · Alyan Guard · Ping · Bot · Panel',
+      'HAProxy · Nginx · Dropbear · WS-Proxy · Xray · Alyan Guard · Bot · Panel',
       `<button class="btn sm" id="btnRefreshEng">${ic('refresh')}<span>Refresh</span></button>
        <button class="btn btn-flame sm" id="btnRestartAll">${ic('bolt')}<span>Restart Full Stack</span></button>`
     );
@@ -1337,7 +1325,7 @@
             <div>
               ${services.map(s => `
                 <div class="svc ${s.status === 'running' ? 'on' : ''}">
-                  <div class="svc-ic">${ic(s.id.includes('xray') ? 'bolt' : s.id.includes('bot') ? 'send' : s.id.includes('qos') ? 'wifi' : 'engine')}</div>
+                  <div class="svc-ic">${ic(s.id.includes('xray') ? 'bolt' : s.id.includes('bot') ? 'send' : 'engine')}</div>
                   <div>
                     <div class="svc-n">${esc(s.name)} <span class="pill ${s.status === 'running' ? 'lit' : 'fire'}">${esc(s.status)}</span></div>
                     <div class="svc-m"><span>${esc(s.desc)}</span><span>mem ${esc(s.mem)}</span><span>up ${esc(s.uptime)}</span></div>
@@ -1418,15 +1406,13 @@
     }, 2000);
   }
 
-  /* ═════════════════════ 5. VPS INFO (Hardware, Metrics & Speedtest · 2s Sync) ═════════════════════ */
+  /* ═════════════════════ 5. VPS INFO (Hardware, Wire-Speed Throughput & Load · 2s Sync) ═════════════════════ */
   async function renderTelemetry() {
     let telBusy = false;
-    let speedRunning = false;
     setBayHead(
-      'SERVER SPECS & BENCHMARK',
+      'SERVER SPECS & LIVE TRAFFIC',
       'VPS Info',
-      'Hardware profile, kernel environment, CPU/Memory history & live Flame Speedtest',
-      `<button class="btn btn-flame sm" id="btnRunSpeed">${ic('bolt')}<span>Run Speedtest</span></button>`
+      'Hardware profile, kernel BBR + FQ wire-speed engine, live NIC throughput & CPU/Memory curves'
     );
 
     const drawTel = async () => {
@@ -1434,8 +1420,8 @@
       STATE.cfg = d.cfg; syncHud();
       const spCpu = sparkPath(d.hist.cpu, 540, 175, 100);
       const spRam = sparkPath(d.hist.ram, 540, 175, 100);
-      const st = d.speedtest;
-      const deg = Math.min(90, Math.max(-90, ((Math.min(1000, st.down) / 1000) * 180) - 90));
+      const spRx = sparkPath(d.hist.rx, 460, 118);
+      const spTx = sparkPath(d.hist.tx, 460, 118);
 
       $('#view').innerHTML = `
         <div class="grid g2">
@@ -1455,24 +1441,27 @@
           </section>
 
           <section class="mod hot">
-            <div class="mod-h"><h3>${ic('bolt')} Flame Speedtest Gauge</h3><span class="sub" id="stRan">${esc(st.ran)}</span></div>
-            <div class="gauge">
-              <svg viewBox="0 0 220 124">
-                <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14" stroke-linecap="round"/>
-                <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="url(#gFlame)" stroke-width="14" stroke-linecap="round"
-                  stroke-dasharray="276.5" stroke-dashoffset="${(276.5 * (1 - Math.min(1000, st.down) / 1000)).toFixed(1)}"/>
-                <g class="needle" id="stNeedle" style="transform:rotate(${deg.toFixed(1)}deg)">
-                  <line x1="110" y1="110" x2="110" y2="34" stroke="#ffd36b" stroke-width="3" stroke-linecap="round"/>
-                  <circle cx="110" cy="110" r="6" fill="#ff3b1f"/>
-                </g>
-              </svg>
-              <div class="g-val"><b id="stDownBig">${st.down}</b><span>Mbps Download · ${esc(st.isp)}</span></div>
+            <div class="mod-h"><h3>${ic('bolt')} Live Wire-Speed Throughput</h3><span class="pill lit">BBR + FQ · Unthrottled</span></div>
+            <div class="st-res" style="margin-bottom:14px">
+              <div class="st"><span>DOWNLOAD RATE</span><b>↓ ${fmtRate(d.rx_bps)}</b></div>
+              <div class="st"><span>UPLOAD RATE</span><b>↑ ${fmtRate(d.tx_bps)}</b></div>
+              <div class="st"><span>LIVE TUNNELS</span><b>${(d.ssh_online || 0) + (d.xray_online || 0)} online</b></div>
             </div>
-            <div class="st-res">
-              <div class="st"><span>PING</span><b id="stPing">${st.ping} ms</b></div>
-              <div class="st"><span>JITTER</span><b id="stJit">${st.jitter} ms</b></div>
-              <div class="st"><span>UPLOAD</span><b id="stUp">${st.up} Mbps</b></div>
-            </div>
+            <svg viewBox="0 0 460 118" preserveAspectRatio="none" class="spark">
+              <defs>
+                <linearGradient id="telRxFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#ff3b1f" stop-opacity=".42"/><stop offset="1" stop-color="#ff3b1f" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <path d="${spRx.area}" fill="url(#telRxFill)"/>
+              <path d="${spRx.line}" fill="none" stroke="#ff3b1f" stroke-width="2.2"/>
+              <path d="${spTx.line}" fill="none" stroke="#ffb000" stroke-width="1.8" stroke-dasharray="4 3"/>
+            </svg>
+            <dl class="kv" style="margin-top:12px">
+              <dt>Congestion Engine</dt><dd>TCP BBR + Fair Queue (FQ Pacing)</dd>
+              <dt>Socket Mode</dt><dd>TCP_NODELAY · Zero Proxy Buffering · Zero Speed Cap</dd>
+              <dt>CPU Load Avg</dt><dd>${esc(d.load)} (${d.cpu_pct}%)</dd>
+            </dl>
           </section>
 
           <section class="mod span2">
@@ -1490,42 +1479,23 @@
         </div>`;
     };
 
-    $('#btnRunSpeed').onclick = async () => {
-      const btn = $('#btnRunSpeed');
-      speedRunning = true;
-      btn.disabled = true;
-      btn.querySelector('span').textContent = 'Testing Line…';
-      toast('Running live speedtest benchmark…');
-      try {
-        await api('/speedtest', { method: 'POST' });
-        toast('Speedtest completed');
-        await drawTel();
-      } catch (err) { toast(err.message, 'err'); }
-      finally {
-        speedRunning = false;
-        btn.disabled = false;
-        if (btn.querySelector('span')) btn.querySelector('span').textContent = 'Run Speedtest';
-      }
-    };
-
     await drawTel();
     STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'telemetry' || document.hidden || telBusy || speedRunning) return;
+      if (STATE.bay !== 'telemetry' || document.hidden || telBusy) return;
       telBusy = true;
       try { await drawTel(); } catch {} finally { telBusy = false; }
     }, 2000);
   }
 
-  /* ═════════════════════ 6. SETTINGS (Domain, SSL, Port, Ping Stability, Banner, Auth) ═════════════════════ */
+  /* ═════════════════════ 6. SETTINGS (Domain, SSL, Port, Banner, Admin Security) ═════════════════════ */
   async function renderForge() {
     const { cfg } = await api('/auth/me');
     STATE.cfg = cfg; syncHud();
     setBayHead(
       'SYSTEM CONFIGURATION',
       'Settings',
-      'Domain & SSL · Webpanel Port · Ping Stability · SSH Handshake Banner · Admin Security'
+      'Domain & SSL · Webpanel Port · SSH Handshake Banner · Admin Security & Stack Repair'
     );
-    const q = cfg.qos || { enabled: true, iface: 'eth0', bw_mbps: 500, preset: 'gaming', caps: [] };
 
     $('#view').innerHTML = `
       <div class="grid g2">
@@ -1545,71 +1515,32 @@
           </form>
         </section>
 
-        <!-- Ping Stability (Renamed cleanly from CAKE Ping QoS) -->
-        <section class="mod hot">
-          <div class="mod-h">
-            <h3>${ic('wifi')} Ping Stability</h3>
-            <span class="pill ${q.enabled ? 'lit' : ''}">${q.enabled ? 'ACTIVE · ' + q.bw_mbps + ' Mbps' : 'DISABLED'}</span>
-          </div>
-          <div class="stack">
-            <div class="preset" id="qosPresets">
-              <button type="button" class="${q.preset === 'gaming' ? 'on' : ''}" data-qp="gaming" data-bw="500"><b>Gaming Low-Ping</b><span>Ultra-low jitter</span></button>
-              <button type="button" class="${q.preset === 'balanced' ? 'on' : ''}" data-qp="balanced" data-bw="800"><b>Balanced</b><span>Fair per-host queue</span></button>
-              <button type="button" class="${q.preset === 'throughput' ? 'on' : ''}" data-qp="throughput" data-bw="1000"><b>Max Throughput</b><span>1 Gbps line-rate</span></button>
-            </div>
+        <!-- Admin Security & Stack Repair -->
+        <section class="mod">
+          <div class="mod-h"><h3>${ic('key')} Admin Security &amp; Stack Repair</h3><span class="sub">Password &amp; Wire-Speed Tune</span></div>
+          <form class="stack" id="pwForm">
             <div class="row2">
-              <label class="field"><span>NIC Interface</span><input id="qosIface" value="${esc(q.iface)}"/></label>
-              <label class="field"><span>Link Ceiling (Mbps)</span><input id="qosBw" type="number" min="10" max="10000" value="${q.bw_mbps}"/></label>
+              <label class="field"><span>New Admin Password</span><input name="new_password" type="password" required minlength="6" placeholder="••••••••"/></label>
+              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" required minlength="6" placeholder="••••••••"/></label>
             </div>
+            <p class="note">One-click Stack Repair re-applies unthrottled Kernel BBR + FQ pacing, clears any NIC traffic shapers, and syncs HAProxy, Nginx, Dropbear &amp; Xray.</p>
             <div class="chips">
-              <button type="button" class="btn btn-flame sm" id="btnApplyPing">${ic('bolt')}<span>Apply Ping Stability</span></button>
-              <button type="button" class="btn btn-danger sm" id="btnOffPing"><span>Disable Ping Stability</span></button>
+              <button type="submit" class="btn btn-flame sm">${ic('lock')}<span>Update Password</span></button>
+              <button type="button" class="btn sm" id="btnFixStack">${ic('refresh')}<span>Fix &amp; Optimize Stack</span></button>
             </div>
-            <div class="hr"></div>
-            <div class="row2">
-              <input class="inp" id="capIp" placeholder="Per-IP cap (e.g. 10.8.0.22)"/>
-              <div style="display:flex;gap:8px">
-                <input class="inp" id="capMbps" type="number" min="1" placeholder="Mbps" value="25"/>
-                <button type="button" class="btn sm" id="btnAddCap">${ic('plus')}<span>Cap</span></button>
-              </div>
-            </div>
-            ${(q.caps && q.caps.length) ? `<div class="chips">${q.caps.map((c, idx) => `<span class="pill ember">${esc(c.ip)} → ${c.mbps}M <button type="button" data-delcap="${idx}" style="color:#fff;margin-left:4px">×</button></span>`).join('')}</div>` : ''}
-          </div>
+          </form>
         </section>
 
         <!-- SSH Handshake Banner -->
-        <section class="mod">
+        <section class="mod span2">
           <div class="mod-h"><h3>${ic('terminal')} SSH Handshake Banner</h3><span class="sub">Dropbear + OpenSSH</span></div>
           <form class="stack" id="bannerForm">
             <label class="field"><span>HTML / ANSI Banner Markup</span><textarea name="banner">${esc(cfg.banner || '')}</textarea></label>
             <div><button type="submit" class="btn btn-flame sm">${ic('check')}<span>Save SSH Banner</span></button></div>
           </form>
         </section>
-
-        <!-- Admin Security & Stack Repair -->
-        <section class="mod">
-          <div class="mod-h"><h3>${ic('key')} Admin Security &amp; Stack Repair</h3><span class="sub">Password &amp; One-click Fix</span></div>
-          <form class="stack" id="pwForm">
-            <div class="row2">
-              <label class="field"><span>New Admin Password</span><input name="new_password" type="password" required minlength="6" placeholder="••••••••"/></label>
-              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" required minlength="6" placeholder="••••••••"/></label>
-            </div>
-            <div class="chips">
-              <button type="submit" class="btn btn-flame sm">${ic('lock')}<span>Update Password</span></button>
-              <button type="button" class="btn sm" id="btnFixStack">${ic('refresh')}<span>Fix SSH-WS / SSL Stack</span></button>
-            </div>
-          </form>
-        </section>
       </div>`;
 
-    let selPreset = q.preset || 'gaming';
-    $$('[data-qp]', $('#qosPresets')).forEach(b => {
-      b.onclick = () => {
-        selPreset = b.dataset.qp;
-        $('#qosBw').value = b.dataset.bw;
-        $$('[data-qp]', $('#qosPresets')).forEach(x => x.classList.toggle('on', x === b));
-      };
-    });
     $('#domForm').onsubmit = async (e) => {
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
@@ -1622,29 +1553,6 @@
       toast('SSL certificate renewed & HAProxy bundle synced');
       renderForge();
     };
-    $('#btnApplyPing').onclick = async () => {
-      await api('/settings', { method: 'POST', body: { qos: { enabled: true, iface: $('#qosIface').value.trim() || 'eth0', bw_mbps: +$('#qosBw').value || 500, preset: selPreset } } });
-      toast('Ping Stability active');
-      renderForge();
-    };
-    $('#btnOffPing').onclick = async () => {
-      await api('/settings', { method: 'POST', body: { qos: { enabled: false } } });
-      toast('Ping Stability disabled');
-      renderForge();
-    };
-    $('#btnAddCap').onclick = async () => {
-      const ip = $('#capIp').value.trim(), mbps = +$('#capMbps').value || 25;
-      if (!ip) { toast('Enter a valid IP address', 'err'); return; }
-      await api('/settings', { method: 'POST', body: { add_cap: { ip, mbps } } });
-      toast(`Per-IP cap added for ${ip}`);
-      renderForge();
-    };
-    $$('[data-delcap]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        await api('/settings', { method: 'POST', body: { del_cap: +b.dataset.delcap } });
-        renderForge();
-      };
-    });
     $('#bannerForm').onsubmit = async (e) => {
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
@@ -1662,7 +1570,7 @@
     $('#btnFixStack').onclick = async () => {
       await api('/settings', { method: 'POST', body: { maint: 'fix_ws_ssl_stack' } });
       await api('/service/all/restart', { method: 'POST' });
-      toast('SSH-WS + SSL + HAProxy + Xray stack verified & repaired');
+      toast('Wire-Speed BBR+FQ + SSH-WS + SSL + Xray stack optimized & restarted');
     };
   }
 
@@ -1896,8 +1804,8 @@
       { label: 'Open SSH Accounts', icon: 'tunnel', run: () => go('tunnels') },
       { label: 'Open Xray', icon: 'bolt', run: () => go('xray') },
       { label: 'Open Engine (Services & Ports)', icon: 'engine', run: () => go('engine') },
-      { label: 'Open VPS Info & Speedtest', icon: 'chart', run: () => go('telemetry') },
-      { label: 'Open Settings & Ping Stability', icon: 'sliders', run: () => go('forge') },
+      { label: 'Open VPS Info', icon: 'chart', run: () => go('telemetry') },
+      { label: 'Open Settings', icon: 'sliders', run: () => go('forge') },
       { label: 'Open Admins (RBAC)', icon: 'shield', run: () => go('admins') },
       { label: 'Open Telegram Bot', icon: 'send', run: () => go('signals') },
       { label: 'Open List', icon: 'list', run: () => go('audit') }

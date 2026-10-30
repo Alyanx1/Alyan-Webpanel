@@ -88,7 +88,7 @@ draw_header() {
   printf "  ${C_RED}┃${C_RST} ${C_GRY}CPU/RAM:${C_RST} ${C_WHT}%2s%% / %2s%%${C_RST}   ${C_GRY}Up:${C_RST} ${C_WHT}%-9s${C_RST} ${C_GRY}SSH:${C_RST} ${C_AMB}%s (%s live)${C_RST}  ${C_GRY}Xray:${C_RST} ${C_AMB}%s${C_RST}  ${C_RED}┃${C_RST}\n" "$cpu" "$ram" "$up" "$ssh_tot" "$ssh_on" "$xray_tot"
   echo -e "  ${C_RED}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫${C_RST}"
   echo -e "  ${C_RED}┃${C_RST} HAProxy $(svc_dot haproxy)  Nginx $(svc_dot nginx)  Dropbear $(svc_dot dropbear)  WS $(svc_dot alyan-wsd)  Xray $(svc_dot xray) ${C_RED}┃${C_RST}"
-  echo -e "  ${C_RED}┃${C_RST} Panel   $(svc_dot alyan-panel)  Guard $(svc_dot alyan-guard)  Ping     $(svc_dot alyan-qos)  Bot $(svc_dot alyan-bot)  :${port}      ${C_RED}┃${C_RST}"
+  echo -e "  ${C_RED}┃${C_RST} Panel   $(svc_dot alyan-panel)  Guard $(svc_dot alyan-guard)  Bot   $(svc_dot alyan-bot)  BBR+FQ ${C_OK}● ON ${C_RST}  :${port}     ${C_RED}┃${C_RST}"
   echo -e "  ${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}"
 }
 
@@ -306,59 +306,29 @@ opt_fix_stack() {
   pause_ret
 }
 
-# ─── Option 7: Ping Stability (QoS) ──────────────────────────────────────────
-opt_ping_qos() {
-  echo -e "\n  ${C_AMB}${C_BOLD}🚀 Option 7 — Ping Stability (Anti-Bufferbloat QoS)${C_RST}"
-  ov=$($CTL --actor cli overview)
-  cur_if=$(echo "$ov" | jq -r '.cfg.qos.iface // "eth0"')
-  cur_bw=$(echo "$ov" | jq -r '.cfg.qos.bw_mbps // 500')
-  cur_en=$(echo "$ov" | jq -r '.cfg.qos.enabled')
-  echo -e "  Current State: ${C_GLD}enabled=${cur_en}${C_RST} · NIC=${C_WHT}${cur_if}${C_RST} · Ceiling=${C_WHT}${cur_bw} Mbps${C_RST}"
-  echo -e "  ${C_ORG}[1]${C_WHT} Apply Gaming Low-Ping Preset (CAKE diffserv4 + nat + ack-filter)${C_RST}"
-  echo -e "  ${C_ORG}[2]${C_WHT} Apply Balanced Fair-Queue Preset${C_RST}"
-  echo -e "  ${C_ORG}[3]${C_WHT} Apply Max Throughput Preset${C_RST}"
-  echo -e "  ${C_ORG}[4]${C_WHT} Add Per-IP Bandwidth Cap${C_RST}"
-  echo -e "  ${C_ORG}[5]${C_WHT} Disable Ping Stability${C_RST}"
-  read -rp "  Choose [1-5, Enter=cancel]: " qopt </dev/tty
-  case "$qopt" in
-    1|2|3)
-      preset="gaming"; [[ "$qopt" == "2" ]] && preset="balanced"; [[ "$qopt" == "3" ]] && preset="throughput"
-      read -rp "  NIC Interface [${cur_if}]: " nif </dev/tty; nif="${nif:-$cur_if}"
-      read -rp "  Bandwidth Ceiling Mbps [${cur_bw}]: " nbw </dev/tty; nbw="${nbw:-$cur_bw}"
-      payload=$(jq -nc --arg i "$nif" --arg p "$preset" --argjson b "$nbw" '{qos:{enabled:true,iface:$i,bw_mbps:$b,preset:$p}}')
-      $CTL --actor cli settings --json "$payload" >/dev/null
-      echo -e "  ${C_OK}✔ Ping Stability (${preset}) active on ${nif} @ ${nbw} Mbps!${C_RST}" ;;
-    4)
-      read -rp "  Target IPv4 address : " cip </dev/tty
-      read -rp "  Speed Cap (Mbps) [25]: " cmb </dev/tty; cmb="${cmb:-25}"
-      payload=$(jq -nc --arg ip "$cip" --argjson m "$cmb" '{add_cap:{ip:$ip,mbps:$m}}')
-      res=$($CTL --actor cli settings --json "$payload" 2>&1)
-      echo "$res" | jq -e '.ok' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Added ${cmb} Mbps cap for ${cip}.${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}" ;;
-    5)
-      $CTL --actor cli settings --json '{"qos":{"enabled":false}}' >/dev/null
-      echo -e "  ${C_OK}✔ Ping Stability disabled.${C_RST}" ;;
-  esac
+# ─── Option 7: Wire-Speed Network Optimizer (BBR + FQ) ───────────────────────
+opt_wirespeed_tune() {
+  echo -e "\n  ${C_AMB}${C_BOLD}🚀 Option 7 — Wire-Speed Network Optimizer (Kernel BBR + FQ Pacing)${C_RST}"
+  local cc qd
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+  qd=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+  echo -e "  Active Kernel Profile: Congestion=${C_GLD}${cc}${C_RST} · Queue=${C_GLD}${qd}${C_RST} · Speed Caps=${C_OK}NONE (Unthrottled)${C_RST}"
+  echo -e "  ${C_GRY}Re-applying 32MB TCP socket buffers, BBR + FQ pacing, TCP_NODELAY & clearing any NIC shapers...${C_RST}"
+  $CTL --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
+  echo -e "  ${C_OK}✔ Full Wire-Speed BBR + FQ profile active! Native line-rate unlocked.${C_RST}"
   pause_ret
 }
 
-# ─── Option 8: VPS Stats / Speedtest ─────────────────────────────────────────
-opt_vps_speedtest() {
-  echo -e "\n  ${C_AMB}${C_BOLD}📊 Option 8 — VPS Hardware Stats & Live Flame Speedtest${C_RST}"
+# ─── Option 8: VPS Hardware & Live Traffic Stats ─────────────────────────────
+opt_vps_stats() {
+  echo -e "\n  ${C_AMB}${C_BOLD}📊 Option 8 — VPS Hardware & Live Traffic Stats${C_RST}"
   tel=$($CTL --actor cli telemetry)
   echo -e "  ${C_GRY}OS / Kernel :${C_RST} $(echo "$tel" | jq -r '.cfg.os') · $(echo "$tel" | jq -r '.cfg.kernel')"
   echo -e "  ${C_GRY}CPU Model   :${C_RST} $(echo "$tel" | jq -r '.cfg.cpu_model')"
   echo -e "  ${C_GRY}Location    :${C_RST} $(echo "$tel" | jq -r '.cfg.location') · $(echo "$tel" | jq -r '.cfg.provider')"
   echo -e "  ${C_GRY}CPU / Load  :${C_RST} $(echo "$tel" | jq -r '.cpu_pct')%  (load: $(echo "$tel" | jq -r '.load'))"
   echo -e "  ${C_GRY}RAM / Disk  :${C_RST} RAM $(echo "$tel" | jq -r '.ram_pct')%  ·  Disk $(echo "$tel" | jq -r '.disk_pct')%"
-  echo ""
-  read -rp "  Run live download/upload benchmark now? [Y/n]: " rst </dev/tty
-  if [[ "${rst,,}" != "n" ]]; then
-    echo -e "  ${C_ORG}🔥 Running live speedtest benchmark (please wait ~10-20s)...${C_RST}"
-    st=$($CTL --actor cli speedtest)
-    echo -e "  ${C_OK}✔ Ping    :${C_RST} $(echo "$st" | jq -r '.ping') ms  (Jitter: $(echo "$st" | jq -r '.jitter') ms)"
-    echo -e "  ${C_OK}✔ Download:${C_RST} ${C_GLD}$(echo "$st" | jq -r '.down') Mbps${C_RST}"
-    echo -e "  ${C_OK}✔ Upload  :${C_RST} ${C_GLD}$(echo "$st" | jq -r '.up') Mbps${C_RST}  ($(echo "$st" | jq -r '.isp'))"
-  fi
+  echo -e "  ${C_GRY}Live Tunnels:${C_RST} SSH $(echo "$tel" | jq -r '.ssh_online') online · Xray $(echo "$tel" | jq -r '.xray_online // 0') online"
   pause_ret
 }
 
@@ -446,8 +416,10 @@ opt_uninstall() {
     rm -f "/etc/systemd/system/${svc}.service"
   done
   rm -rf /etc/systemd/system/dropbear.service.d/alyan.conf \
+         /etc/systemd/system/nginx.service.d/alyan-limits.conf \
+         /etc/systemd/system/haproxy.service.d/alyan-limits.conf \
          /etc/nginx/conf.d/alyan-router.conf /etc/nginx/conf.d/alyan-panel.conf \
-         /etc/sudoers.d/alyan-panel /etc/sysctl.d/99-alyan-bbr.conf \
+         /etc/sudoers.d/alyan-panel /etc/sysctl.d/99-alyan-bbr.conf /etc/sysctl.d/99-alyan-turbo.conf \
          /usr/local/bin/alyan-ctl /usr/local/bin/menu \
          /opt/alyan /etc/alyan /var/lib/alyan /var/log/alyan /run/alyan-*.json
   systemctl daemon-reload
@@ -460,8 +432,8 @@ opt_uninstall() {
 # ═════════════════════════════════════════════════════════════════════════════
 while true; do
   draw_header
-  echo -e "  ${C_ORG}  [1]${C_WHT} Install All Components          ${C_ORG}[7]${C_WHT}  Ping Stability (QoS)${C_RST}"
-  echo -e "  ${C_ORG}  [2]${C_WHT} Add / Change Domain             ${C_ORG}[8]${C_WHT}  VPS Stats / Speedtest${C_RST}"
+  echo -e "  ${C_ORG}  [1]${C_WHT} Install All Components          ${C_ORG}[7]${C_WHT}  Wire-Speed Optimizer (BBR+FQ)${C_RST}"
+  echo -e "  ${C_ORG}  [2]${C_WHT} Add / Change Domain             ${C_ORG}[8]${C_WHT}  VPS Hardware & Live Traffic${C_RST}"
   echo -e "  ${C_ORG}  [3]${C_WHT} SSL Certificate (Issue/Renew)   ${C_ORG}[9]${C_WHT}  Telegram Bot${C_RST}"
   echo -e "  ${C_ORG}  [4]${C_WHT} Manage Users / Limits / Banner  ${C_ORG}[10]${C_WHT} Web Panel (Link / Login / Port)${C_RST}"
   echo -e "  ${C_ORG}  [5]${C_WHT} Status & Ports                  ${C_ORG}[11]${C_ERR} Uninstall${C_RST}"
@@ -478,8 +450,8 @@ while true; do
     4)  opt_manage_users ;;
     5)  opt_status_ports ;;
     6)  opt_fix_stack ;;
-    7)  opt_ping_qos ;;
-    8)  opt_vps_speedtest ;;
+    7)  opt_wirespeed_tune ;;
+    8)  opt_vps_stats ;;
     9)  opt_telegram_bot ;;
     10) opt_webpanel ;;
     11) opt_uninstall ;;

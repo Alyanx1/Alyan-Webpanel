@@ -179,7 +179,7 @@ async def format_status_html() -> str:
         f"🖥 <b>IP / OS:</b> <code>{html.escape(cfg['ip'])}</code> · {html.escape(cfg['os'])}\n"
         f"⏱ <b>Uptime:</b> {html.escape(cfg['uptime'])} · <b>SSL:</b> {cfg['ssl_days']}d\n"
         f"⚡ <b>CPU:</b> {d['cpu_pct']}% · <b>RAM:</b> {d['ram_pct']}% · <b>Disk:</b> {d['disk_pct']}%\n"
-        f"👥 <b>SSH:</b> {d['ssh_total']} ({d['ssh_online']} online) · <b>Xray:</b> {d['xray_total']}\n"
+        f"👥 <b>SSH:</b> {d['ssh_total']} ({d['ssh_online']} online) · <b>Xray:</b> {d['xray_total']} ({d.get('xray_online', 0)} online)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(svc_lines)
     )
@@ -200,7 +200,7 @@ async def format_users_html() -> str:
     if not x_data["items"]:
         lines.append("<i>No Xray clients</i>")
     for u in x_data["items"][:25]:
-        st = "🟢 online" if u["online"] else "⚪ idle"
+        st = "🔴 disable" if u["status"] == "disabled" else (f"🟢 {u['online']} live" if u["online"] else "⚪ offline")
         lines.append(f"• <code>{html.escape(u['username'])}</code> ({u['proto'].upper()}) [{st}] — exp <code>{u['expiry']}</code>")
     return "\n".join(lines)
 
@@ -418,9 +418,20 @@ async def handle_callback(client: httpx.AsyncClient, token: str, chat_id: int, c
                 {"text": f"🗑 SSH {u['username']}", "callback_data": f"sdel:{u['username']}"},
             ])
         for x in x_data["items"][:8]:
-            rows.append([{"text": f"🗑 {x['proto'].upper()} {x['username']}", "callback_data": f"xdel:{x['uuid']}"}])
+            xtog = "🟢 Enable" if x["status"] == "disabled" else "⏸ Disable"
+            xnxt = "active" if x["status"] == "disabled" else "disabled"
+            rows.append([
+                {"text": f"{xtog} {x['username']}", "callback_data": f"xtog:{x['uuid']}:{xnxt}"},
+                {"text": f"🗑 {x['proto'].upper()} {x['username']}", "callback_data": f"xdel:{x['uuid']}"},
+            ])
         rows.append([{"text": "⬅ Back", "callback_data": "back:main"}])
         await send_msg(client, token, chat_id, "Manage account lock or delete:", {"inline_keyboard": rows})
+        return
+
+    if data.startswith("xtog:"):
+        _, uid, nxt = data.split(":", 2)
+        await ctl(["xray-edit", "--uuid", uid, "--json", json.dumps({"status": nxt})])
+        await send_msg(client, token, chat_id, f"✅ Xray client → <b>{html.escape(nxt)}</b>", main_menu_kb())
         return
 
     if data.startswith("stog:"):

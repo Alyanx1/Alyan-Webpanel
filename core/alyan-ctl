@@ -32,7 +32,7 @@ SSL_DIR = ETC_DIR / "ssl"
 VAR_DIR = Path("/var/lib/alyan")
 DB_PATH = VAR_DIR / "alyan.db"
 LIVE_SNAP = Path("/run/alyan-live.json")
-QOS_CONF = ETC_DIR / "qos.json"
+SSL_CACHE = Path("/run/alyan-ssl-cache.json")
 BOT_CONF = ETC_DIR / "bot.json"
 BANNER_FILE = ETC_DIR / "banner.txt"
 CREDS_FILE = ETC_DIR / "credentials.txt"
@@ -53,7 +53,6 @@ MANAGED_SERVICES = [
     ("alyan-wsd",   "Alyan WS-Proxy",       "GET /alyan 101 + Real-IP Bridge"),
     ("xray",        "Xray-Core Engine",     "VMess · VLESS · Trojan · XHTTP"),
     ("alyan-guard", "Alyan Guard",          "GB Quota · Expiry · IP Enforcer"),
-    ("alyan-qos",   "Ping",                 "Low Latency Stability"),
     ("alyan-bot",   "Telegram Bot",         "Full User & Server Control"),
     ("alyan-panel", "Alyan Webpanel",       "FastAPI Command Deck"),
 ]
@@ -161,6 +160,11 @@ def ssl_days_remaining() -> int:
     if not cert.exists():
         return 0
     try:
+        mtime = cert.stat().st_mtime
+        if SSL_CACHE.exists():
+            cached = json.loads(SSL_CACHE.read_text(encoding="utf-8"))
+            if cached.get("mtime") == mtime and (time.time() - float(cached.get("ts", 0))) < 3600:
+                return int(cached["days"])
         out = subprocess.check_output(
             ["openssl", "x509", "-enddate", "-noout", "-in", str(cert)],
             text=True,
@@ -169,7 +173,12 @@ def ssl_days_remaining() -> int:
         # notAfter=Jan 28 06:00:00 2027 GMT
         dt_str = out.split("=", 1)[1].strip()
         exp = dt.datetime.strptime(dt_str, "%b %d %H:%M:%S %Y %Z")
-        return max(0, (exp - dt.datetime.utcnow()).days)
+        days = max(0, (exp - dt.datetime.utcnow()).days)
+        try:
+            SSL_CACHE.write_text(json.dumps({"mtime": mtime, "ts": time.time(), "days": days}), encoding="utf-8")
+        except Exception:
+            pass
+        return days
     except Exception:
         return 89
 
@@ -209,7 +218,6 @@ def detect_os_and_cpu() -> tuple[str, str, str]:
 
 def build_cfg_dict(conn: sqlite3.Connection) -> dict:
     os_name, kernel, cpu_model = detect_os_and_cpu()
-    qos = json.loads(get_setting(conn, "qos_json", '{"enabled":true,"iface":"eth0","bw_mbps":500,"preset":"gaming","caps":[]}'))
     bot = json.loads(get_setting(conn, "bot_json", '{"enabled":false,"token":"","admin_id":"","alerts":true}'))
     return {
         "domain": get_setting(conn, "domain", "localhost"),
@@ -224,26 +232,127 @@ def build_cfg_dict(conn: sqlite3.Connection) -> dict:
         "uptime": system_uptime_human(),
         "ws_path": "/alyan",
         "banner": get_setting(conn, "banner", ""),
-        "qos": qos,
         "bot": bot,
     }
 
 
-# ─── Config Rendering & Stack Sync ───────────────────────────────────────────
+# ─── Wire-Speed Kernel Tuning, Unthrottled NIC & Config Rendering ────────────
+def apply_kernel_network_tuning(iface: str = "eth0"):
+    """
+    Remove all artificial tc/CAKE/HTB bandwidth caps & shapers, activate Linux BBR + FQ
+    packet pacing immediately on the live NIC, eliminate mid-session cwnd drops, and
+    tune socket buffers + worker file descriptors for 100% native line-rate & flat ping.
+    """
+    # 1. Stop & remove any legacy alyan-qos shaper unit or config
+    subprocess.run(["systemctl", "stop", "alyan-qos"], stderr=subprocess.DEVNULL)
+    subprocess.run(["systemctl", "disable", "alyan-qos"], stderr=subprocess.DEVNULL)
+    for stale_path in (
+        Path("/etc/systemd/system/alyan-qos.service"),
+        ETC_DIR / "qos.json",
+        Path("/etc/sysctl.d/99-alyan-bbr.conf"),
+    ):
+        stale_path.unlink(missing_ok=True)
+
+    # 2. Detect live default NIC + configured NIC, wipe any root/ingress shapers, and attach native 'fq'
+    ifaces = {iface.strip() or "eth0"}
+    try:
+        rt = subprocess.check_output(["ip", "route", "get", "1.1.1.1"], text=True, stderr=subprocess.DEVNULL, timeout=3)
+        parts = rt.split()
+        if "dev" in parts:
+            idx = parts.index("dev")
+            if idx + 1 < len(parts):
+                ifaces.add(parts[idx + 1])
+    except Exception:
+        pass
+
+    for dev in ifaces:
+        subprocess.run(["tc", "qdisc", "del", "dev", dev, "root"], stderr=subprocess.DEVNULL)
+        subprocess.run(["tc", "qdisc", "del", "dev", dev, "ingress"], stderr=subprocess.DEVNULL)
+        subprocess.run(["tc", "qdisc", "replace", "dev", dev, "root", "fq"], stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", "dev", dev, "txqueuelen", "10000"], stderr=subprocess.DEVNULL)
+    subprocess.run(["ip", "link", "del", "ifb0"], stderr=subprocess.DEVNULL)
+
+    # 3. Write full wire-speed + anti-drop + low-bufferbloat sysctl profile
+    subprocess.run(["modprobe", "tcp_bbr"], stderr=subprocess.DEVNULL)
+    sysctl_dir = Path("/etc/sysctl.d")
+    sysctl_dir.mkdir(parents=True, exist_ok=True)
+    (sysctl_dir / "99-alyan-turbo.conf").write_text(
+        "\n".join(
+            [
+                "# Alyan Webpanel — Native Wire-Speed + Stable Ping Kernel Profile",
+                "fs.file-max = 2097152",
+                "net.core.default_qdisc = fq",
+                "net.ipv4.tcp_congestion_control = bbr",
+                "net.core.somaxconn = 65535",
+                "net.core.netdev_max_backlog = 65536",
+                "net.core.optmem_max = 25165824",
+                "net.core.rmem_default = 262144",
+                "net.core.wmem_default = 262144",
+                "net.core.rmem_max = 33554432",
+                "net.core.wmem_max = 33554432",
+                "net.ipv4.tcp_rmem = 4096 131072 33554432",
+                "net.ipv4.tcp_wmem = 4096 65536 33554432",
+                "net.ipv4.udp_rmem_min = 16384",
+                "net.ipv4.udp_wmem_min = 16384",
+                "net.ipv4.tcp_notsent_lowat = 16384",
+                "net.ipv4.tcp_slow_start_after_idle = 0",
+                "net.ipv4.tcp_mtu_probing = 1",
+                "net.ipv4.tcp_fastopen = 3",
+                "net.ipv4.tcp_tw_reuse = 1",
+                "net.ipv4.tcp_fin_timeout = 15",
+                "net.ipv4.tcp_max_syn_backlog = 65536",
+                "net.ipv4.tcp_max_tw_buckets = 2000000",
+                "net.ipv4.ip_local_port_range = 10240 65535",
+                "net.ipv4.tcp_keepalive_time = 60",
+                "net.ipv4.tcp_keepalive_intvl = 10",
+                "net.ipv4.tcp_keepalive_probes = 6",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(["sysctl", "--system"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 4. Raise Nginx & HAProxy file-descriptor & worker_connections limits so multiplexed streams never choke
+    for daemon in ("nginx", "haproxy"):
+        d_ovr = Path(f"/etc/systemd/system/{daemon}.service.d")
+        d_ovr.mkdir(parents=True, exist_ok=True)
+        (d_ovr / "alyan-limits.conf").write_text("[Service]\nLimitNOFILE=1048576\n", encoding="utf-8")
+
+    ng_main = Path("/etc/nginx/nginx.conf")
+    if ng_main.exists():
+        try:
+            ng_txt = ng_main.read_text(encoding="utf-8", errors="ignore")
+            orig = ng_txt
+            if "worker_rlimit_nofile" not in ng_txt:
+                ng_txt = re.sub(
+                    r"(worker_processes\s+[^;]+;)",
+                    r"\1\nworker_rlimit_nofile 65535;",
+                    ng_txt,
+                    count=1,
+                )
+            ng_txt = re.sub(r"worker_connections\s+\d+\s*;", "worker_connections 32768;", ng_txt)
+            ng_txt = re.sub(r"#\s*multi_accept\s+on\s*;", "multi_accept on;", ng_txt)
+            if ng_txt != orig:
+                ng_main.write_text(ng_txt, encoding="utf-8")
+        except Exception:
+            pass
+
+
 def configure_dropbear_and_banner(banner_text: str):
     ETC_DIR.mkdir(parents=True, exist_ok=True)
     BANNER_FILE.write_text(banner_text or "", encoding="utf-8")
 
     # Configure /etc/default/dropbear + systemd override for Ubuntu 22.04 & 24.04 compatibility
     Path("/etc/default/dropbear").write_text(
-        'NO_START=0\nDROPBEAR_PORT=109\nDROPBEAR_EXTRA_ARGS="-p 143 -b /etc/alyan/banner.txt -w -K 60 -I 300"\nDROPBEAR_BANNER="/etc/alyan/banner.txt"\n',
+        'NO_START=0\nDROPBEAR_PORT=109\nDROPBEAR_EXTRA_ARGS="-p 143 -b /etc/alyan/banner.txt -w -K 30 -I 600"\nDROPBEAR_BANNER="/etc/alyan/banner.txt"\n',
         encoding="utf-8",
     )
     ovr_dir = Path("/etc/systemd/system/dropbear.service.d")
     ovr_dir.mkdir(parents=True, exist_ok=True)
     db_bin = shutil.which("dropbear") or "/usr/sbin/dropbear"
     (ovr_dir / "alyan.conf").write_text(
-        f"[Service]\nExecStart=\nExecStart={db_bin} -EF -p 109 -p 143 -b /etc/alyan/banner.txt -w -K 60 -I 300\n",
+        f"[Service]\nLimitNOFILE=1048576\nExecStart=\nExecStart={db_bin} -EF -p 109 -p 143 -b /etc/alyan/banner.txt -w -K 30 -I 600\n",
         encoding="utf-8",
     )
 
@@ -282,6 +391,27 @@ def sync_xray_config(conn: sqlite3.Connection, reload_service: bool = True):
     out_dir = Path("/usr/local/etc/xray")
     out_dir.mkdir(parents=True, exist_ok=True)
     Path("/var/log/xray").mkdir(parents=True, exist_ok=True)
+
+    xray_bin = Path("/usr/local/bin/xray")
+    tmp_cfg = out_dir / ".config.test.json"
+    if xray_bin.exists():
+        tmp_cfg.write_text(rendered, encoding="utf-8")
+        chk = subprocess.run(
+            [str(xray_bin), "run", "-test", "-config", str(tmp_cfg)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if chk.returncode != 0 and "trustedXForwardedFor" in rendered:
+            try:
+                cfg_obj = json.loads(rendered)
+                for inb in cfg_obj.get("inbounds", []):
+                    so = inb.get("streamSettings", {}).get("sockopt", {})
+                    so.pop("trustedXForwardedFor", None)
+                rendered = json.dumps(cfg_obj, indent=2)
+            except Exception:
+                pass
+        tmp_cfg.unlink(missing_ok=True)
+
     (out_dir / "config.json").write_text(rendered, encoding="utf-8")
     if reload_service:
         subprocess.run(["systemctl", "restart", "xray"], stderr=subprocess.DEVNULL)
@@ -291,8 +421,10 @@ def render_all_configs(conn: sqlite3.Connection, reload_daemons: bool = False):
     domain = get_setting(conn, "domain", "localhost")
     panel_port = get_setting(conn, "panel_port", "8443")
     banner = get_setting(conn, "banner", "")
+    iface = get_setting(conn, "iface", "eth0")
 
     Path("/var/www/alyan-acme/.well-known/acme-challenge").mkdir(parents=True, exist_ok=True)
+    apply_kernel_network_tuning(iface)
     configure_dropbear_and_banner(banner)
 
     # Ensure HAProxy combined PEM exists
@@ -719,6 +851,10 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
         "tx": [0.3] * 12,
     }
 
+    snap_svcs = snap.get("services")
+    snap_fresh = (time.time() - float(snap.get("ts", 0))) < 10.0
+    svcs = snap_svcs if (isinstance(snap_svcs, list) and snap_svcs and snap_fresh) else collect_services()
+
     return {
         "cpu_pct": cpu_pct,
         "load": inst["load"],
@@ -739,106 +875,10 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
         "xray_vless": sum(1 for r in xray_rows if r["proto"] == "vless"),
         "xray_vmess": sum(1 for r in xray_rows if r["proto"] == "vmess"),
         "xray_trojan": sum(1 for r in xray_rows if r["proto"] == "trojan"),
-        "services": collect_services(),
+        "services": svcs,
         "cfg": cfg,
         "hist": hist,
     }
-
-
-def run_speedtest(conn: sqlite3.Connection, actor: str = "admin", ip: str = "local") -> dict:
-    isp = get_setting(conn, "provider", "Dedicated VPS")
-    ran_label = f"Just now · {dt.datetime.now().strftime('%H:%M')}"
-
-    # 1. Prefer official Ookla speedtest binary if installed on VPS
-    ookla = shutil.which("speedtest")
-    if ookla:
-        try:
-            raw = subprocess.check_output(
-                [ookla, "--accept-license", "--accept-gdpr", "-f", "json"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-                timeout=45,
-            )
-            d = json.loads(raw)
-            if "download" in d and "bandwidth" in d["download"]:
-                res = {
-                    "ping": round(float(d.get("ping", {}).get("latency", 4.0)), 1),
-                    "jitter": round(float(d.get("ping", {}).get("jitter", 0.5)), 2),
-                    "down": round((float(d["download"]["bandwidth"]) * 8) / 1_000_000.0, 1),
-                    "up": round((float(d["upload"]["bandwidth"]) * 8) / 1_000_000.0, 1),
-                    "isp": d.get("isp") or isp,
-                    "ran": ran_label,
-                }
-                set_setting(conn, "speedtest_json", json.dumps(res))
-                add_audit(conn, actor, "speedtest", f"down={res['down']}Mbps up={res['up']}Mbps", ip)
-                conn.commit()
-                return res
-        except Exception:
-            pass
-
-    # 2. Pure-stdlib Cloudflare Edge HTTPS Speedtest (zero extra packages needed)
-    ctx = ssl.create_default_context()
-    rtts = []
-    for _ in range(4):
-        t0 = time.perf_counter()
-        try:
-            req = urllib.request.Request("https://speed.cloudflare.com/__down?bytes=64", headers={"User-Agent": "Alyan-Flame/2.0"})
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
-                resp.read()
-            rtts.append((time.perf_counter() - t0) * 1000.0)
-        except Exception:
-            pass
-
-    ping_ms = round(min(rtts), 1) if rtts else 8.5
-    jitter_ms = round((max(rtts) - min(rtts)) / max(1, len(rtts)), 2) if len(rtts) > 1 else 0.6
-
-    # Download 20 MB stream
-    down_mbps = 0.0
-    try:
-        t0 = time.perf_counter()
-        total_b = 0
-        req = urllib.request.Request("https://speed.cloudflare.com/__down?bytes=20000000", headers={"User-Agent": "Alyan-Flame/2.0"})
-        with urllib.request.urlopen(req, timeout=18, context=ctx) as resp:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                total_b += len(chunk)
-        el = max(0.05, time.perf_counter() - t0)
-        down_mbps = round((total_b * 8) / (el * 1_000_000.0), 1)
-    except Exception:
-        down_mbps = 100.0
-
-    # Upload 4 MB payload
-    up_mbps = 0.0
-    try:
-        payload = b"A" * 4_000_000
-        t0 = time.perf_counter()
-        req = urllib.request.Request(
-            "https://speed.cloudflare.com/__up",
-            data=payload,
-            headers={"User-Agent": "Alyan-Flame/2.0", "Content-Type": "application/octet-stream"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=18, context=ctx) as resp:
-            resp.read()
-        el = max(0.05, time.perf_counter() - t0)
-        up_mbps = round((len(payload) * 8) / (el * 1_000_000.0), 1)
-    except Exception:
-        up_mbps = round(down_mbps * 0.75, 1)
-
-    res = {
-        "ping": ping_ms,
-        "jitter": jitter_ms,
-        "down": down_mbps,
-        "up": up_mbps,
-        "isp": isp,
-        "ran": ran_label,
-    }
-    set_setting(conn, "speedtest_json", json.dumps(res))
-    add_audit(conn, actor, "speedtest", f"down={res['down']}Mbps up={res['up']}Mbps", ip)
-    conn.commit()
-    return res
 
 
 # ─── Daemon Control & Systemd Logs ───────────────────────────────────────────
@@ -870,7 +910,7 @@ def service_action(conn: sqlite3.Connection, actor_info: dict, svc_id: str, acti
 
     if svc_id == "all":
         bot_cfg = json.loads(get_setting(conn, "bot_json", "{}"))
-        stack = ["dropbear", "alyan-wsd", "xray", "nginx", "haproxy", "alyan-guard", "alyan-qos"]
+        stack = ["dropbear", "alyan-wsd", "xray", "nginx", "haproxy", "alyan-guard"]
         if bot_cfg.get("enabled"):
             stack.append("alyan-bot")
         for s in stack:
@@ -896,6 +936,44 @@ def service_action(conn: sqlite3.Connection, actor_info: dict, svc_id: str, acti
 
 
 # ─── SSH Tunnel Account Management ───────────────────────────────────────────
+def kill_ssh_user_sessions(username: str):
+    """Terminate both OpenSSH user-owned processes and root-owned Dropbear worker children."""
+    subprocess.run(["pkill", "-KILL", "-u", username], stderr=subprocess.DEVNULL)
+    try:
+        out = subprocess.check_output(
+            ["journalctl", "-u", "dropbear", "-n", "400", "--no-pager", "-o", "short-iso"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        pat = re.compile(
+            r"(?:dropbear\[(\d+)\]|\[(\d+)\]).*?(?:Password|Pubkey) auth succeeded for '([^']+)'",
+            re.IGNORECASE,
+        )
+        target_low = username.lower()
+        for ln in out.splitlines():
+            m = pat.search(ln)
+            if not m or m.group(3).lower() != target_low:
+                continue
+            pid = int(m.group(1) or m.group(2))
+            comm_p = Path(f"/proc/{pid}/comm")
+            stat_p = Path(f"/proc/{pid}/status")
+            if not comm_p.exists() or "dropbear" not in comm_p.read_text(errors="ignore").lower():
+                continue
+            ppid = 1
+            for sln in stat_p.read_text(errors="ignore").splitlines():
+                if sln.startswith("PPid:"):
+                    ppid = int(sln.split(":", 1)[1].strip())
+                    break
+            if ppid > 1:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
 def validate_username(username: str) -> str:
     u = (username or "").strip()
     if not SAFE_USER_RE.match(u):
@@ -1007,7 +1085,7 @@ def ssh_edit(conn: sqlite3.Connection, actor_info: dict, username: str, payload:
         status = payload["status"]
         if status == "disabled":
             subprocess.run(["usermod", "-L", username], stderr=subprocess.DEVNULL)
-            subprocess.run(["pkill", "-KILL", "-u", username], stderr=subprocess.DEVNULL)
+            kill_ssh_user_sessions(username)
         else:
             subprocess.run(["usermod", "-U", username], stderr=subprocess.DEVNULL)
             subprocess.run(["chage", "-E", expiry, username], stderr=subprocess.DEVNULL)
@@ -1037,7 +1115,7 @@ def ssh_del(conn: sqlite3.Connection, actor_info: dict, username: str, ip: str =
     if not can_access_owner(actor_info, row["owner"]):
         raise PermissionError("Access denied to this SSH account")
 
-    subprocess.run(["pkill", "-KILL", "-u", username], stderr=subprocess.DEVNULL)
+    kill_ssh_user_sessions(username)
     subprocess.run(["userdel", "-f", username], stderr=subprocess.DEVNULL)
     conn.execute("DELETE FROM ssh_users WHERE username = ?", (username,))
     add_audit(conn, actor_info["username"], "ssh_delete", f"user={username}", ip)
@@ -1173,7 +1251,7 @@ def xray_del(conn: sqlite3.Connection, actor_info: dict, uuid_key: str, ip: str 
     return {"ok": True}
 
 
-# ─── System Settings, Ping Stability, Bot, Stack Repair & Init ───────────────
+# ─── System Settings, Bot, Wire-Speed Stack Repair & Init ────────────────────
 RESERVED_INTERNAL_PORTS = {22, 80, 109, 143, 443, 2095, 4443, 7700, 8880, 8881, 10001, 10002, 10003, 10011, 10012, 10013, 10023, 10031, 10085}
 
 
@@ -1198,6 +1276,7 @@ def ensure_self_signed_ssl(domain: str):
         os.chmod(fc, 0o600)
         os.chmod(pk, 0o600)
         os.chmod(hp, 0o600)
+        SSL_CACHE.unlink(missing_ok=True)
 
 
 def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip: str = "local") -> dict:
@@ -1221,7 +1300,7 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
         add_audit(conn, uname, "password_change", f"user={target_admin}", ip)
 
     # Global server mutations require Super Admin
-    server_keys = {"domain", "panel_port", "ssl_renew", "banner", "qos", "add_cap", "del_cap", "bot", "maint"}
+    server_keys = {"domain", "panel_port", "ssl_renew", "banner", "bot", "maint"}
     if any(k in payload for k in server_keys) and not is_super:
         raise PermissionError("Only Super Admins may modify global server settings")
 
@@ -1254,38 +1333,6 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
         subprocess.run(["systemctl", "restart", "dropbear"], stderr=subprocess.DEVNULL)
         add_audit(conn, uname, "banner_set", f"{len(btxt)} bytes", ip)
 
-    if any(k in payload for k in ("qos", "add_cap", "del_cap")):
-        qos = json.loads(get_setting(conn, "qos_json", '{"enabled":true,"iface":"eth0","bw_mbps":500,"preset":"gaming","caps":[]}'))
-        if isinstance(payload.get("qos"), dict):
-            qos.update(payload["qos"])
-        if isinstance(payload.get("add_cap"), dict):
-            cap_ip = str(payload["add_cap"].get("ip") or "").strip()
-            cap_mb = max(1, int(float(payload["add_cap"].get("mbps") or 25)))
-            if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", cap_ip):
-                raise ValueError("Invalid IPv4 address for bandwidth cap")
-            qos.setdefault("caps", []).append({"ip": cap_ip, "mbps": cap_mb})
-            add_audit(conn, uname, "ping_cap_add", f"{cap_ip}={cap_mb}M", ip)
-        if payload.get("del_cap") is not None:
-            idx = int(payload["del_cap"])
-            caps = qos.get("caps", [])
-            if 0 <= idx < len(caps):
-                removed = caps.pop(idx)
-                add_audit(conn, uname, "ping_cap_del", f"{removed.get('ip')}", ip)
-        set_setting(conn, "qos_json", json.dumps(qos))
-        ETC_DIR.mkdir(parents=True, exist_ok=True)
-        QOS_CONF.write_text(json.dumps(qos, indent=2), encoding="utf-8")
-        qos_script = INSTALL_DIR / "services" / "qos" / "alyan-qos.sh"
-        if qos.get("enabled"):
-            if qos_script.exists():
-                subprocess.run(["bash", str(qos_script), "apply"], stderr=subprocess.DEVNULL)
-            subprocess.run(["systemctl", "start", "alyan-qos"], stderr=subprocess.DEVNULL)
-            add_audit(conn, uname, "ping_apply", f"{qos.get('iface')} @ {qos.get('bw_mbps')}M ({qos.get('preset')})", ip)
-        else:
-            if qos_script.exists():
-                subprocess.run(["bash", str(qos_script), "stop"], stderr=subprocess.DEVNULL)
-            subprocess.run(["systemctl", "stop", "alyan-qos"], stderr=subprocess.DEVNULL)
-            add_audit(conn, uname, "ping_disable", "Ping Stability disabled", ip)
-
     if isinstance(payload.get("bot"), dict):
         bot = json.loads(get_setting(conn, "bot_json", '{"enabled":false,"token":"","admin_id":"","alerts":true}'))
         bot.update(payload["bot"])
@@ -1302,9 +1349,10 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
         add_audit(conn, uname, "bot_config", f"enabled={bool(bot.get('enabled'))}", ip)
 
     if payload.get("maint") == "fix_ws_ssl_stack":
+        conn.execute("DELETE FROM settings WHERE key IN ('qos_json', 'speedtest_json')")
         ensure_self_signed_ssl(get_setting(conn, "domain", "localhost"))
         render_all_configs(conn, reload_daemons=True)
-        add_audit(conn, uname, "stack_repair", "SSH-WS + SSL + HAProxy + Nginx + Xray repaired", ip)
+        add_audit(conn, uname, "stack_repair", "Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy + Nginx + Xray tuned", ip)
         need_render = False
 
     conn.commit()
@@ -1316,6 +1364,7 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
     if need_ssl:
         try:
             issue_ssl(conn, standalone=False)
+            SSL_CACHE.unlink(missing_ok=True)
             add_audit(conn, uname, "ssl_renew", get_setting(conn, "domain", ""), ip)
             conn.commit()
         except Exception:
@@ -1360,6 +1409,7 @@ def init_system(conn: sqlite3.Connection, domain: str, panel_port: int, iface: s
     set_setting(conn, "panel_port", str(panel_port))
     set_setting(conn, "iface", iface.strip() or "eth0")
     set_setting(conn, "ip", pub_ip.strip() or "127.0.0.1")
+    conn.execute("DELETE FROM settings WHERE key IN ('qos_json', 'speedtest_json')")
 
     # Fetch Geo / ISP details cleanly
     if not get_setting(conn, "provider"):
@@ -1386,20 +1436,11 @@ def init_system(conn: sqlite3.Connection, domain: str, panel_port: int, iface: s
         )
         set_setting(conn, "banner", default_banner)
 
-    if not get_setting(conn, "qos_json"):
-        qos_init = {"enabled": True, "iface": iface or "eth0", "bw_mbps": 500, "preset": "gaming", "caps": []}
-        set_setting(conn, "qos_json", json.dumps(qos_init))
-        QOS_CONF.write_text(json.dumps(qos_init, indent=2), encoding="utf-8")
-
     if not get_setting(conn, "bot_json"):
         bot_init = {"enabled": False, "token": "", "admin_id": "", "alerts": True}
         set_setting(conn, "bot_json", json.dumps(bot_init))
         BOT_CONF.write_text(json.dumps(bot_init, indent=2), encoding="utf-8")
         os.chmod(BOT_CONF, 0o600)
-
-    if not get_setting(conn, "speedtest_json"):
-        st_init = {"ping": 0.0, "jitter": 0.0, "down": 0.0, "up": 0.0, "isp": get_setting(conn, "provider", "Dedicated VPS"), "ran": "Not tested yet"}
-        set_setting(conn, "speedtest_json", json.dumps(st_init))
 
     # Ensure primary Super Admin exists
     adm = conn.execute("SELECT 1 FROM admins WHERE username = 'admin'").fetchone()
@@ -1568,7 +1609,6 @@ def main():
 
     sub.add_parser("overview")
     sub.add_parser("telemetry")
-    sub.add_parser("speedtest")
     sub.add_parser("engine")
     sub.add_parser("xray-sync")
     sub.add_parser("tg-test")
@@ -1646,15 +1686,8 @@ def main():
             out = init_system(conn, args.domain, args.panel_port, args.iface, args.ip)
         elif args.cmd == "ssl-issue":
             out = issue_ssl(conn, standalone=args.standalone)
-        elif args.cmd == "overview":
+        elif args.cmd in ("overview", "telemetry"):
             out = build_overview_payload(conn, actor_info)
-        elif args.cmd == "telemetry":
-            ov = build_overview_payload(conn, actor_info)
-            st_raw = get_setting(conn, "speedtest_json", "")
-            ov["speedtest"] = json.loads(st_raw) if st_raw else {"ping": 0, "jitter": 0, "down": 0, "up": 0, "isp": ov["cfg"]["provider"], "ran": "Not tested yet"}
-            out = ov
-        elif args.cmd == "speedtest":
-            out = run_speedtest(conn, actor=actor_info["username"], ip=cip)
         elif args.cmd == "engine":
             prt = int(get_setting(conn, "panel_port", "8443"))
             out = {"services": collect_services(), "ports": collect_listening_ports(prt)}

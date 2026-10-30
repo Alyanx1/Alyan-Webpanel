@@ -3,8 +3,8 @@
 #  🔥 ALYAN WEBPANEL — Automated Flame Tunneling Stack & Web Dashboard Installer
 #  Target OS : Ubuntu 22.04 LTS / 24.04 LTS & newer (x86_64 / arm64)
 #  Stack     : HAProxy (80/443) + Nginx + Dropbear (109/143) + WS (/alyan) +
-#              Xray (VLESS/VMess/Trojan) + CAKE QoS + FastAPI Webpanel + Bot
-#  One-Liner : bash <(curl -sSL https://raw.githubusercontent.com/YOUR_USER/alyan-webpanel/main/install.sh)
+#              Xray (VLESS/VMess/Trojan) + Wire-Speed BBR + FastAPI Webpanel + Bot
+#  One-Liner : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh)
 # ═════════════════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
@@ -48,7 +48,7 @@ flame_banner() {
   echo ""
   echo -e "${C_GLD}  🔥  A L Y A N   W E B P A N E L  ${C_GRY}v${ALYAN_VERSION} · INFERNO COMMAND DECK${C_RST}"
   echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}"
-  echo -e "${C_WHT}  SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Xray · Ping QoS${C_RST}"
+  echo -e "${C_WHT}  SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Xray · Wire-Speed BBR${C_RST}"
   echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}\n"
 }
 
@@ -137,7 +137,7 @@ fetch_asset() {
 }
 
 deploy_project_files() {
-  mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,qos,systemd},templates}
+  mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,systemd},templates}
 
   local local_check=""
   if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -158,7 +158,6 @@ deploy_project_files() {
   fetch_asset "core/alyan-ctl"                   "${INSTALL_DIR}/core/alyan-ctl"
   fetch_asset "services/wsd/alyan-wsd.py"        "${INSTALL_DIR}/services/wsd/alyan-wsd.py"
   fetch_asset "services/guard/alyan-guard.py"    "${INSTALL_DIR}/services/guard/alyan-guard.py"
-  fetch_asset "services/qos/alyan-qos.sh"        "${INSTALL_DIR}/services/qos/alyan-qos.sh"
   fetch_asset "templates/haproxy.cfg.tpl"        "${INSTALL_DIR}/templates/haproxy.cfg.tpl"
   fetch_asset "templates/nginx-router.conf.tpl"  "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
   fetch_asset "templates/nginx-panel.conf.tpl"   "${INSTALL_DIR}/templates/nginx-panel.conf.tpl"
@@ -169,11 +168,11 @@ deploy_project_files() {
   fetch_asset "panel/static/app.css"             "${INSTALL_DIR}/panel/static/app.css"
   fetch_asset "panel/static/app.js"              "${INSTALL_DIR}/panel/static/app.js"
   fetch_asset "bot/alyan-bot.py"                 "${INSTALL_DIR}/bot/alyan-bot.py"
-  for unit in alyan-wsd alyan-guard alyan-qos alyan-panel alyan-bot; do
+  for unit in alyan-wsd alyan-guard alyan-panel alyan-bot; do
     fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
   done
-  rm -rf "/tmp/alyan-bundle-src"
-  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/qos/alyan-qos.sh" 2>/dev/null || true
+  rm -rf "/tmp/alyan-bundle-src" "${INSTALL_DIR}/services/qos"
+  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" 2>/dev/null || true
   ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
   ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
 }
@@ -204,19 +203,26 @@ SUDO
 if [[ "${1:-}" == "--update" ]]; then
   preflight_check
   flame_banner
-  section_hdr "UPDATE" "Applying Live Alyan Webpanel Hot-Update"
-  systemctl stop alyan-panel alyan-bot 2>/dev/null || true
+  section_hdr "UPDATE" "Applying Live Alyan Webpanel Wire-Speed Hot-Update"
+  systemctl stop alyan-panel alyan-bot alyan-qos 2>/dev/null || true
+  systemctl disable alyan-qos 2>/dev/null || true
+  rm -f /etc/systemd/system/alyan-qos.service /etc/alyan/qos.json /etc/sysctl.d/99-alyan-bbr.conf
   run_task 45 "Syncing latest Engine, Guard, WSD & UI from GitHub" deploy_project_files
-  run_task 75 "Migrating service account & unlocking 'Alyan' username" ensure_panel_service_user
+  run_task 75 "Verifying service account & permissions" ensure_panel_service_user
   rebuild_and_restart() {
+    : > /var/log/xray/access.log 2>/dev/null || true
+    rm -f /run/alyan-live.json /run/alyan-ssl-cache.json
     systemctl daemon-reload
     /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
-    for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-qos alyan-panel; do
+    for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
       systemctl restart "$svc"
     done
+    if systemctl is-enabled --quiet alyan-bot 2>/dev/null; then
+      systemctl restart alyan-bot || true
+    fi
   }
-  run_task 100 "Recompiling configs & restarting live tunneling stack" rebuild_and_restart
-  echo -e "\n  ${C_OK}✔ Live Update Complete! Refresh your Webpanel browser tab (Ctrl+F5).${C_RST}\n"
+  run_task 100 "Applying Kernel BBR+FQ & restarting tunneling stack" rebuild_and_restart
+  echo -e "\n  ${C_OK}✔ Live Wire-Speed Update Complete! Refresh your Webpanel tab (Ctrl+F5).${C_RST}\n"
   exit 0
 fi
 
@@ -354,15 +360,8 @@ issue_ssl_and_render() {
 run_task 90 "Issuing Let's Encrypt SSL & compiling Flame Router" issue_ssl_and_render
 
 start_all_services() {
-  # Enable TCP BBR congestion control
-  cat >/etc/sysctl.d/99-alyan-bbr.conf <<'SYS'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-SYS
-  sysctl --system >/dev/null 2>&1 || true
-
   systemctl daemon-reload
-  for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-qos alyan-panel; do
+  for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
     systemctl enable "$svc" >/dev/null 2>&1 || true
     systemctl restart "$svc"
   done
