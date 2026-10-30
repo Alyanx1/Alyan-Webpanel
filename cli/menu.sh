@@ -75,22 +75,14 @@ draw_header() {
   ssh_on=$(echo "$ov" | jq -r '.ssh_online // 0')
   xray_tot=$(echo "$ov" | jq -r '.xray_total // 0')
 
-  echo -e "${C_RED}${C_BOLD}"
-  cat <<'EOF'
-     █████╗ ██╗  ██╗   ██╗ █████╗ ███╗   ██╗
-    ██╔══██╗██║  ╚██╗ ██╔╝██╔══██╗████╗  ██║
-EOF
-  echo -e "${C_ORG}${C_BOLD}"
-  cat <<'EOF'
-    ███████║██║   ╚████╔╝ ███████║██╔██╗ ██║
-    ██╔══██║██║    ╚██╔╝  ██╔══██║██║╚██╗██║
-EOF
-  echo -e "${C_AMB}${C_BOLD}"
-  cat <<'EOF'
-    ██║  ██║███████╗██║   ██║  ██║██║ ╚████║
-    ╚═╝  ╚═╝╚══════╝╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝
-EOF
-  echo -e "${C_RST}  🔥 ${C_GLD}${C_BOLD}ALYAN WEBPANEL${C_RST} ${C_GRY}· FLAME TUNNELING COMMAND DECK${C_RST}"
+  echo ""
+  echo -e "\033[1;38;2;255;30;30m   █████╗  ██╗   ██╗   ██╗  █████╗  ███╗   ██╗${C_RST}"
+  echo -e "\033[1;38;2;255;64;16m  ██╔══██╗ ██║   ╚██╗ ██╔╝ ██╔══██╗ ████╗  ██║${C_RST}"
+  echo -e "\033[1;38;2;255;106;0m  ███████║ ██║    ╚████╔╝  ███████║ ██╔██╗ ██║${C_RST}"
+  echo -e "\033[1;38;2;255;150;0m  ██╔══██║ ██║     ╚██╔╝   ██╔══██║ ██║╚██╗██║${C_RST}"
+  echo -e "\033[1;38;2;255;192;24m  ██║  ██║ ███████╗ ██║    ██║  ██║ ██║ ╚████║${C_RST}"
+  echo -e "\033[1;38;2;255;224;110m  ╚═╝  ╚═╝ ╚══════╝ ╚═╝    ╚═╝  ╚═╝ ╚═╝  ╚═══╝${C_RST}"
+  echo -e "  🔥 ${C_GLD}${C_BOLD}ALYAN WEBPANEL${C_RST} ${C_GRY}· FLAME TUNNELING COMMAND DECK${C_RST}"
   echo -e "  ${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
   printf "  ${C_RED}┃${C_RST} ${C_GRY}Domain :${C_RST} ${C_GLD}%-24s${C_RST} ${C_GRY}IP :${C_RST} ${C_WHT}%-16s${C_RST} ${C_GRY}SSL:${C_RST} ${C_AMB}%3sd${C_RST} ${C_RED}┃${C_RST}\n" "$domain" "$ip" "$ssl_d"
   printf "  ${C_RED}┃${C_RST} ${C_GRY}CPU/RAM:${C_RST} ${C_WHT}%2s%% / %2s%%${C_RST}   ${C_GRY}Up:${C_RST} ${C_WHT}%-9s${C_RST} ${C_GRY}SSH:${C_RST} ${C_AMB}%s (%s live)${C_RST}  ${C_GRY}Xray:${C_RST} ${C_AMB}%s${C_RST}  ${C_RED}┃${C_RST}\n" "$cpu" "$ram" "$up" "$ssh_tot" "$ssh_on" "$xray_tot"

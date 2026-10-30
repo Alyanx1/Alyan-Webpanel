@@ -38,25 +38,18 @@ mkdir -p "$LOG_DIR" "$ETC_DIR/ssl" "$VAR_DIR"
 # ─── Visual Helpers ──────────────────────────────────────────────────────────
 flame_banner() {
   clear || true
-  echo -e "${C_RED}${C_BOLD}"
-  cat <<'EOF'
-     █████╗ ██╗  ██╗   ██╗ █████╗ ███╗   ██╗
-    ██╔══██╗██║  ╚██╗ ██╔╝██╔══██╗████╗  ██║
-EOF
-  echo -e "${C_ORG}${C_BOLD}"
-  cat <<'EOF'
-    ███████║██║   ╚████╔╝ ███████║██╔██╗ ██║
-    ██╔══██║██║    ╚██╔╝  ██╔══██║██║╚██╗██║
-EOF
-  echo -e "${C_AMB}${C_BOLD}"
-  cat <<'EOF'
-    ██║  ██║███████╗██║   ██║  ██║██║ ╚████║
-    ╚═╝  ╚═╝╚══════╝╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝
-EOF
-  echo -e "${C_RST}${C_GLD}   🔥  A L Y A N   W E B P A N E L  ${C_GRY}v${ALYAN_VERSION} · INFERNO COMMAND DECK${C_RST}"
-  echo -e "${C_GRY}   ─────────────────────────────────────────────────────────────────${C_RST}"
-  echo -e "${C_WHT}   SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Xray · CAKE QoS${C_RST}"
-  echo -e "${C_GRY}   ─────────────────────────────────────────────────────────────────${C_RST}\n"
+  echo ""
+  echo -e "\033[1;38;2;255;30;30m   █████╗  ██╗   ██╗   ██╗  █████╗  ███╗   ██╗${C_RST}"
+  echo -e "\033[1;38;2;255;64;16m  ██╔══██╗ ██║   ╚██╗ ██╔╝ ██╔══██╗ ████╗  ██║${C_RST}"
+  echo -e "\033[1;38;2;255;106;0m  ███████║ ██║    ╚████╔╝  ███████║ ██╔██╗ ██║${C_RST}"
+  echo -e "\033[1;38;2;255;150;0m  ██╔══██║ ██║     ╚██╔╝   ██╔══██║ ██║╚██╗██║${C_RST}"
+  echo -e "\033[1;38;2;255;192;24m  ██║  ██║ ███████╗ ██║    ██║  ██║ ██║ ╚████║${C_RST}"
+  echo -e "\033[1;38;2;255;224;110m  ╚═╝  ╚═╝ ╚══════╝ ╚═╝    ╚═╝  ╚═╝ ╚═╝  ╚═══╝${C_RST}"
+  echo ""
+  echo -e "${C_GLD}  🔥  A L Y A N   W E B P A N E L  ${C_GRY}v${ALYAN_VERSION} · INFERNO COMMAND DECK${C_RST}"
+  echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}"
+  echo -e "${C_WHT}  SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Xray · Ping QoS${C_RST}"
+  echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}\n"
 }
 
 section_hdr() {
