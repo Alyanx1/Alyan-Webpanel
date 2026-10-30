@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#050507" />
+  <title>Alyan Webpanel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <canvas id="embers" aria-hidden="true"></canvas>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <!-- ═════════════ LOGIN ═════════════ -->
+  <section id="login" class="login" hidden>
+    <form class="login-card" id="loginForm" autocomplete="on">
+      <div class="login-logo">
+        <svg viewBox="0 0 64 64" class="flame-svg big"><use href="#flame" /></svg>
+        <span class="login-ring"></span>
+      </div>
+      <h1 class="brand-xl"><span>ALYAN</span> WEBPANEL</h1>
+      <p class="muted center">Tunnel Command Deck</p>
+      <label class="field"><span>Username</span>
+        <input name="username" autocomplete="username" required placeholder="admin" /></label>
+      <label class="field"><span>Password</span>
+        <input name="password" type="password" autocomplete="current-password" required placeholder="••••••••" /></label>
+      <button class="btn btn-flame wide" type="submit"><span>Ignite Session</span></button>
+      <p class="login-err" id="loginErr"></p>
+      <p class="tiny dim center" id="loginFoot">secure session · rate-limited</p>
+    </form>
+  </section>
+
+  <!-- ═════════════ APP SHELL (LEFT FIRE SIDEBAR + MAIN STAGE) ═════════════ -->
+  <div id="app" class="app-shell" hidden>
+    <div class="sb-backdrop" id="sbBackdrop" hidden></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Main Navigation">
+      <!-- 50% Visible Live Animated Fire Canvas -->
+      <canvas id="sidebarFire" class="sidebar-fire" aria-hidden="true"></canvas>
+
+      <div class="sb-inner">
+        <div class="sb-brand">
+          <svg viewBox="0 0 64 64" class="flame-svg"><use href="#flame" /></svg>
+          <div class="brand-txt"><b>ALYAN</b><small>WEBPANEL</small></div>
+          <button class="icon-btn sm sb-close" id="sbClose" type="button" title="Close menu" data-i="x"></button>
+        </div>
+
+        <nav class="sb-nav" id="sbNav">
+          <button data-go="core"      class="sb-item on"><i data-nav-i="core"></i><span>Core</span></button>
+          <button data-go="tunnels"   class="sb-item"><i data-nav-i="ssh"></i><span>SSH Accounts</span></button>
+          <button data-go="xray"      class="sb-item"><i data-nav-i="xray"></i><span>Xray</span></button>
+          <button data-go="engine"    class="sb-item"><i data-nav-i="engine"></i><span>Engine</span></button>
+          <button data-go="telemetry" class="sb-item"><i data-nav-i="vps"></i><span>VPS Info</span></button>
+          <button data-go="forge"     class="sb-item"><i data-nav-i="settings"></i><span>Settings</span></button>
+          <button data-go="admins"    class="sb-item"><i data-nav-i="admins"></i><span>Admins</span></button>
+          <button data-go="signals"   class="sb-item"><i data-nav-i="telegram"></i><span>Telegram</span></button>
+          <button data-go="audit"     class="sb-item"><i data-nav-i="list"></i><span>List</span></button>
+        </nav>
+
+        <div class="sb-foot">
+          <span class="dot lit"></span>
+          <span class="mono tiny muted">FLAME ENGINE v1.0</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main-stage">
+      <header class="hud">
+        <div class="hud-left">
+          <button class="icon-btn mob-menu" id="btnMobMenu" type="button" title="Menu" data-i="menu"></button>
+          <div class="mob-brand">
+            <svg viewBox="0 0 64 64" class="flame-svg"><use href="#flame" /></svg>
+            <div class="brand-txt"><b>ALYAN</b><small>WEBPANEL</small></div>
+          </div>
+        </div>
+        <!-- Clean plain header space (domain/port chip removed as requested) -->
+        <div class="hud-spacer"></div>
+        <div class="hud-right">
+          <span class="hud-clock mono" id="hudClock">--:--:--</span>
+          <button class="icon-btn" id="btnPalette" title="Command palette (Ctrl+K)" data-i="search"></button>
+          <button class="me" id="btnMe" title="Account">
+            <span class="me-av" id="meAv">A</span>
+            <span class="me-meta"><b id="meName">admin</b><em class="role" id="meRole">SUPER</em></span>
+          </button>
+        </div>
+      </header>
+
+      <div class="bay-head" id="bayHead"></div>
+      <main id="view" class="view"></main>
+    </div>
+  </div>
+
+  <!-- Modal / Sheet -->
+  <div class="sheet-wrap" id="sheetWrap" hidden>
+    <div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <!-- Command Palette -->
+  <div class="palette-wrap" id="paletteWrap" hidden>
+    <div class="palette">
+      <div class="palette-in"><i data-i="search"></i><input id="paletteInput" placeholder="Type a command…  (ssh, xray, ping, ssl…)" autocomplete="off" /></div>
+      <ul id="paletteList"></ul>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <!-- SVG Gradients & Flame Symbol -->
+  <svg width="0" height="0" style="position:absolute">
+    <defs>
+      <linearGradient id="gFlame" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0" stop-color="#ff1e1e" /><stop offset=".55" stop-color="#ff5a00" /><stop offset="1" stop-color="#ffc400" />
+      </linearGradient>
+      <linearGradient id="gFlameInner" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0" stop-color="#ffb000" /><stop offset="1" stop-color="#fff3c4" />
+      </linearGradient>
+      <symbol id="flame" viewBox="0 0 64 64">
+        <path fill="url(#gFlame)" d="M33 3c2.4 9.6-6.8 14.2-6.8 22.2 0 3.4 2.3 5.8 5.4 5.8 4.6 0 6.9-4.6 5.1-10.3C44.2 25.3 50 33 50 41.4 50 52.2 42 60 32 60S14 52.2 14 41.4C14 27.6 28.4 20.4 33 3z" />
+        <path fill="url(#gFlameInner)" d="M32.4 34c1 4.4-3.2 6.4-3.2 10 0 1.6 1 2.6 2.4 2.6 2 0 3.2-2 2.4-4.6 3 2 4.6 5 4.6 8C38.6 54.4 35.8 57 32 57s-6.6-2.6-6.6-7c0-6.2 5-9.6 7-16z" />
+      </symbol>
+    </defs>
+  </svg>
+
+  <script src="app.js"></script>
+</body>
+</html>

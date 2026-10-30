@@ -1,0 +1,14 @@
+[Unit]
+Description=Alyan Guard (SSH & Xray GB Quota, Multi-IP & Expiry Enforcer)
+After=network.target xray.service alyan-wsd.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/alyan/services/guard/alyan-guard.py
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

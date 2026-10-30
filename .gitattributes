@@ -1,0 +1,10 @@
+# Force Unix LF (\n) line endings on all scripts & configs so Ubuntu VPS never hits CRLF (\r) errors
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.tpl text eol=lf
+*.service text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+core/alyan-ctl text eol=lf

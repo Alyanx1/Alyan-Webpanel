@@ -1,0 +1,17 @@
+[Unit]
+Description=Alyan Webpanel FastAPI Command Deck
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=alyan
+Group=alyan
+WorkingDirectory=/opt/alyan/panel
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/alyan/venv/bin/uvicorn app:app --host 127.0.0.1 --port 7700 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

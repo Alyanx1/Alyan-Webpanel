@@ -1,0 +1,14 @@
+[Unit]
+Description=Alyan Ping Stability Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/alyan/services/qos/alyan-qos.sh apply
+ExecReload=/opt/alyan/services/qos/alyan-qos.sh apply
+ExecStop=/opt/alyan/services/qos/alyan-qos.sh stop
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Alyan WS-Proxy (/alyan HTTP 101 + PROXY-v2 SSH Bridge)
+After=network.target dropbear.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/alyan/services/wsd/alyan-wsd.py
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

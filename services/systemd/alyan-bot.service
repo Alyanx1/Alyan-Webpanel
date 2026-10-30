@@ -1,0 +1,17 @@
+[Unit]
+Description=Alyan Telegram Remote User-Management Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alyan
+Group=alyan
+WorkingDirectory=/opt/alyan/bot
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/alyan/venv/bin/python /opt/alyan/bot/alyan-bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
