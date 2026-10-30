@@ -4,7 +4,8 @@
 #  Target OS : Ubuntu 22.04 LTS / 24.04 LTS & newer (x86_64 / arm64)
 #  Stack     : HAProxy (80/443) + Nginx + Dropbear (109/143) + WS (/alyan) +
 #              Xray (VLESS/VMess/Trojan) + Wire-Speed BBR + FastAPI Webpanel + Bot
-#  One-Liner : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh)
+#  Install   : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh | tr -d '\r')
+#  Update    : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh | tr -d '\r') --update
 # ═════════════════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
@@ -115,11 +116,12 @@ preflight_check() {
 
 # ─── Helper: Fetch File from Local Bundle or Remote GitHub Repo ──────────────
 BUNDLE_DIR=""
+FORCE_REMOTE_UPDATE="${FORCE_REMOTE_UPDATE:-0}"
 fetch_asset() {
   local rel="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
   local script_dir=""
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  if [[ "$FORCE_REMOTE_UPDATE" != "1" && -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   fi
   if [[ -n "$script_dir" && -f "${script_dir}/${rel}" ]]; then
@@ -140,10 +142,10 @@ deploy_project_files() {
   mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,systemd},templates}
 
   local local_check=""
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  if [[ "$FORCE_REMOTE_UPDATE" != "1" && -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
     local_check="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   fi
-  if [[ -z "$local_check" || ! -f "${local_check}/core/alyan-ctl" ]]; then
+  if [[ "$FORCE_REMOTE_UPDATE" == "1" || -z "$local_check" || ! -f "${local_check}/core/alyan-ctl" ]]; then
     BUNDLE_DIR="/tmp/alyan-bundle-src"
     rm -rf "$BUNDLE_DIR"
     if [[ -n "${ALYAN_GH_TOKEN:-}" ]]; then
@@ -175,6 +177,11 @@ deploy_project_files() {
   chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" 2>/dev/null || true
   ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
   ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
+  cat >/usr/local/bin/alyan-update <<'UPDSCRIPT'
+#!/usr/bin/env bash
+exec bash <(curl -fsSL "https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh?ts=$(date +%s)" | tr -d '\r') --update
+UPDSCRIPT
+  chmod +x /usr/local/bin/alyan-update
 }
 
 ensure_panel_service_user() {
@@ -201,6 +208,7 @@ SUDO
 
 # ─── Fast Live Hot-Update Mode (`install.sh --update`) ───────────────────────
 if [[ "${1:-}" == "--update" ]]; then
+  FORCE_REMOTE_UPDATE="1"
   preflight_check
   flame_banner
   section_hdr "UPDATE" "Applying Live Alyan Webpanel Wire-Speed Hot-Update"
@@ -222,7 +230,8 @@ if [[ "${1:-}" == "--update" ]]; then
     fi
   }
   run_task 100 "Applying Kernel BBR+FQ & restarting tunneling stack" rebuild_and_restart
-  echo -e "\n  ${C_OK}✔ Live Wire-Speed Update Complete! Refresh your Webpanel tab (Ctrl+F5).${C_RST}\n"
+  echo -e "\n  ${C_OK}✔ Live Wire-Speed Update Complete! Refresh your Webpanel tab (Ctrl+F5).${C_RST}"
+  echo -e "  ${C_GRY}Tip: Next time you can also just run ${C_GLD}alyan-update${C_GRY} or ${C_GLD}menu${C_GRY} → Option 1.${C_RST}\n"
   exit 0
 fi
 
@@ -406,4 +415,4 @@ echo -e "${C_RED}┗━━━━━━━━━━━━━━━━━━━━
 if (( ALL_HEALTHY == 0 )); then
   echo -e "${C_AMB}⚠ Note: One or more checks reported a warning. Run 'menu' → Option 6 to inspect/fix.${C_RST}"
 fi
-echo -e "\n👉 ${C_GLD}${C_BOLD}Type 'menu' to access the CLI dashboard.${C_RST}\n"
+echo -e "\n👉 ${C_GLD}${C_BOLD}Type 'menu' for CLI dashboard, or 'alyan-update' anytime to pull GitHub updates.${C_RST}\n"

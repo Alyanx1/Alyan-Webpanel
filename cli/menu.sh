@@ -92,23 +92,38 @@ draw_header() {
   echo -e "  ${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}"
 }
 
-# ─── Option 1: Install / Re-Verify All Components ────────────────────────────
+# ─── Option 1: Update from GitHub / Re-Verify All Components ──────────────────
 opt_install_all() {
-  echo -e "\n  ${C_AMB}${C_BOLD}⚡ Option 1 — Install / Re-Verify All Components${C_RST}"
-  if [[ -f "${INSTALL_DIR}/install.sh" ]]; then
-    read -rp "  Re-run full installer? [y/N]: " ans </dev/tty
-    if [[ "${ans,,}" == "y" ]]; then
-      bash "${INSTALL_DIR}/install.sh"
+  echo -e "\n  ${C_AMB}${C_BOLD}⚡ Option 1 — Live GitHub Update / Re-Verify Stack${C_RST}"
+  echo -e "  ${C_ORG}  [1]${C_WHT} Pull Latest Update from GitHub (--update) [Zero Data Loss]${C_RST}"
+  echo -e "  ${C_ORG}  [2]${C_WHT} Verify Local Packages & Restart Stack${C_RST}"
+  echo -e "  ${C_ORG}  [3]${C_WHT} Re-run Full Interactive Installer${C_RST}"
+  echo -e "  ${C_ORG}  [0]${C_GRY} Back${C_RST}\n"
+  read -rp "  Select action [1]: " sub </dev/tty
+  sub="${sub:-1}"
+  case "$sub" in
+    1)
+      bash <(curl -fsSL "https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh?ts=$(date +%s)" | tr -d '\r') --update
       pause_ret
-      return
-    fi
-  fi
-  echo -e "  ${C_GRY}Verifying packages, configs & restarting tunneling stack...${C_RST}"
-  apt-get update -qq && apt-get install -y -qq dropbear nginx haproxy jq sqlite3 curl openssl iproute2 >/dev/null
-  $CTL --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
-  $CTL --actor cli service all restart >/dev/null
-  echo -e "  ${C_OK}✔ All core packages, templates & daemons verified and running!${C_RST}"
-  pause_ret
+      ;;
+    2)
+      echo -e "  ${C_GRY}Verifying packages, configs & restarting tunneling stack...${C_RST}"
+      apt-get update -qq && apt-get install -y -qq dropbear nginx haproxy jq sqlite3 curl openssl iproute2 >/dev/null
+      $CTL --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
+      $CTL --actor cli service all restart >/dev/null
+      echo -e "  ${C_OK}✔ All core packages, templates & daemons verified and running!${C_RST}"
+      pause_ret
+      ;;
+    3)
+      if [[ -f "${INSTALL_DIR}/install.sh" ]]; then
+        bash "${INSTALL_DIR}/install.sh"
+      else
+        bash <(curl -fsSL "https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh?ts=$(date +%s)" | tr -d '\r')
+      fi
+      pause_ret
+      ;;
+    *) ;;
+  esac
 }
 
 # ─── Option 2: Add / Change Domain (Auto SSL) ────────────────────────────────
@@ -420,7 +435,7 @@ opt_uninstall() {
          /etc/systemd/system/haproxy.service.d/alyan-limits.conf \
          /etc/nginx/conf.d/alyan-router.conf /etc/nginx/conf.d/alyan-panel.conf \
          /etc/sudoers.d/alyan-panel /etc/sysctl.d/99-alyan-bbr.conf /etc/sysctl.d/99-alyan-turbo.conf \
-         /usr/local/bin/alyan-ctl /usr/local/bin/menu \
+         /usr/local/bin/alyan-ctl /usr/local/bin/menu /usr/local/bin/alyan-update \
          /opt/alyan /etc/alyan /var/lib/alyan /var/log/alyan /run/alyan-*.json
   systemctl daemon-reload
   echo -e "  ${C_OK}✔ Alyan Webpanel has been cleanly uninstalled.${C_RST}"
@@ -432,7 +447,7 @@ opt_uninstall() {
 # ═════════════════════════════════════════════════════════════════════════════
 while true; do
   draw_header
-  echo -e "  ${C_ORG}  [1]${C_WHT} Install All Components          ${C_ORG}[7]${C_WHT}  Wire-Speed Optimizer (BBR+FQ)${C_RST}"
+  echo -e "  ${C_ORG}  [1]${C_WHT} Update / Install Stack          ${C_ORG}[7]${C_WHT}  Wire-Speed Optimizer (BBR+FQ)${C_RST}"
   echo -e "  ${C_ORG}  [2]${C_WHT} Add / Change Domain             ${C_ORG}[8]${C_WHT}  VPS Hardware & Live Traffic${C_RST}"
   echo -e "  ${C_ORG}  [3]${C_WHT} SSL Certificate (Issue/Renew)   ${C_ORG}[9]${C_WHT}  Telegram Bot${C_RST}"
   echo -e "  ${C_ORG}  [4]${C_WHT} Manage Users / Limits / Banner  ${C_ORG}[10]${C_WHT} Web Panel (Link / Login / Port)${C_RST}"
