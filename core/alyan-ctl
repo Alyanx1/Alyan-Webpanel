@@ -43,7 +43,7 @@ RESERVED_USERS = {
     "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
     "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats",
     "nobody", "systemd-network", "systemd-resolve", "messagebus", "sshd",
-    "haproxy", "nginx", "dropbear", "ubuntu", "debian", "alyan",
+    "haproxy", "nginx", "dropbear", "ubuntu", "debian", "_alyanpanel",
 }
 
 MANAGED_SERVICES = [
@@ -265,7 +265,7 @@ def sync_xray_config(conn: sqlite3.Connection, reload_service: bool = True):
     rows = conn.execute("SELECT * FROM xray_users WHERE status = 'active'").fetchall()
     vless_c, vmess_c, trojan_c = [], [], []
     for r in rows:
-        email = f"{r['username']}@alyan"
+        email = f"{r['username']}.{r['proto']}@alyan"
         if r["proto"] == "vless":
             vless_c.append({"id": r["uuid"], "email": email, "level": 0})
         elif r["proto"] == "vmess":
@@ -695,12 +695,18 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
     cfg = build_cfg_dict(conn)
 
     ssh_rows = [r for r in conn.execute("SELECT username, owner, status FROM ssh_users").fetchall() if can_access_owner(actor_info, r["owner"])]
-    xray_rows = [r for r in conn.execute("SELECT uuid, proto, owner FROM xray_users").fetchall() if can_access_owner(actor_info, r["owner"])]
+    xray_rows = [r for r in conn.execute("SELECT uuid, proto, owner, status FROM xray_users").fetchall() if can_access_owner(actor_info, r["owner"])]
 
     ssh_live = snap.get("ssh_live", {})
     ssh_online = sum(
         int(ssh_live.get(r["username"], {}).get("online", 0))
         for r in ssh_rows
+        if r["status"] == "active"
+    )
+    xray_live = snap.get("xray_live", {})
+    xray_online = sum(
+        int(xray_live.get(r["uuid"], {}).get("online", 0))
+        for r in xray_rows
         if r["status"] == "active"
     )
 
@@ -729,6 +735,7 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
         "ssh_total": len(ssh_rows),
         "ssh_online": ssh_online,
         "xray_total": len(xray_rows),
+        "xray_online": xray_online,
         "xray_vless": sum(1 for r in xray_rows if r["proto"] == "vless"),
         "xray_vmess": sum(1 for r in xray_rows if r["proto"] == "vmess"),
         "xray_trojan": sum(1 for r in xray_rows if r["proto"] == "trojan"),
@@ -943,8 +950,6 @@ def ssh_add(
     dup = conn.execute("SELECT 1 FROM ssh_users WHERE LOWER(username) = LOWER(?)", (u,)).fetchone()
     if dup:
         raise ValueError(f"SSH account '{u}' already exists")
-    if subprocess.run(["id", "-u", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        raise ValueError(f"Linux user '{u}' already exists on system")
 
     shells_file = Path("/etc/shells")
     if shells_file.exists() and "/bin/false" not in shells_file.read_text(encoding="utf-8", errors="ignore"):
@@ -952,7 +957,10 @@ def ssh_add(
             sf.write("\n/bin/false\n")
 
     exp_date = (dt.date.today() + dt.timedelta(days=max(1, int(days)))).isoformat()
-    subprocess.run(["useradd", "-M", "-N", "-s", "/bin/false", "-e", exp_date, u], check=True, stderr=subprocess.PIPE)
+    if subprocess.run(["id", "-u", u], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        subprocess.run(["usermod", "-s", "/bin/false", "-e", exp_date, u], check=True, stderr=subprocess.PIPE)
+    else:
+        subprocess.run(["useradd", "-M", "-N", "-s", "/bin/false", "-e", exp_date, u], check=True, stderr=subprocess.PIPE)
     subprocess.run(["chpasswd"], input=f"{u}:{pw}\n", text=True, check=True, stderr=subprocess.PIPE)
     subprocess.run(["usermod", "-U", u], stderr=subprocess.DEVNULL)
 
@@ -1140,7 +1148,8 @@ def xray_edit(conn: sqlite3.Connection, actor_info: dict, uuid_key: str, payload
         """,
         (new_uid, new_u, new_p, used_b, max(0.0, gb_lim), max(0, ip_lim), expiry, status, uuid_key),
     )
-    add_audit(conn, actor_info["username"], "xray_edit", f"proto={new_p} user={new_u}", ip)
+    act_tag = f"xray_{status}" if payload.get("status") else "xray_edit"
+    add_audit(conn, actor_info["username"], act_tag, f"proto={new_p} user={new_u}", ip)
     conn.commit()
     sync_xray_config(conn, reload_service=True)
 

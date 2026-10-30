@@ -7,6 +7,11 @@ map $http_upgrade $alyan_connection_upgrade {
     ''      close;
 }
 
+map $http_cf_connecting_ip $alyan_real_ip {
+    ""      $proxy_protocol_addr;
+    default $http_cf_connecting_ip;
+}
+
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {
     listen 127.0.0.1:8880 proxy_protocol;
@@ -29,8 +34,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }
@@ -42,8 +47,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }
@@ -55,8 +60,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }
@@ -69,8 +74,8 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $proxy_protocol_addr;
-        proxy_set_header X-Forwarded-For $proxy_protocol_addr;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
         proxy_read_timeout 86400s;
     }
 
@@ -95,19 +100,22 @@ server {
 
     location /alyan-vless-grpc {
         client_max_body_size 0;
-        grpc_set_header X-Real-IP $proxy_protocol_addr;
+        grpc_set_header X-Real-IP $alyan_real_ip;
+        grpc_set_header X-Forwarded-For $alyan_real_ip;
         grpc_pass grpc://127.0.0.1:10011;
     }
 
     location /alyan-vmess-grpc {
         client_max_body_size 0;
-        grpc_set_header X-Real-IP $proxy_protocol_addr;
+        grpc_set_header X-Real-IP $alyan_real_ip;
+        grpc_set_header X-Forwarded-For $alyan_real_ip;
         grpc_pass grpc://127.0.0.1:10012;
     }
 
     location /alyan-trojan-grpc {
         client_max_body_size 0;
-        grpc_set_header X-Real-IP $proxy_protocol_addr;
+        grpc_set_header X-Real-IP $alyan_real_ip;
+        grpc_set_header X-Forwarded-For $alyan_real_ip;
         grpc_pass grpc://127.0.0.1:10013;
     }
 

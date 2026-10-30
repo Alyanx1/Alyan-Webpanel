@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=alyan
-Group=alyan
+User=_alyanpanel
+Group=_alyanpanel
 WorkingDirectory=/opt/alyan/bot
 Environment="PYTHONUNBUFFERED=1"
 ExecStart=/opt/alyan/venv/bin/python /opt/alyan/bot/alyan-bot.py

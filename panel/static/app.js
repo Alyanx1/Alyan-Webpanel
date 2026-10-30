@@ -504,8 +504,9 @@
       disk_pct: 14, disk_used: 11.2 * 1073741824, disk_total: 80 * 1073741824,
       rx_bps: rx * 1048576 / 8, tx_bps: tx * 1048576 / 8,
       rx_total: 148.6 * 1073741824, tx_total: 139.2 * 1073741824,
-      ssh_total: DEMO.ssh.length, ssh_online: DEMO.ssh.reduce((a, u) => a + u.online, 0),
+      ssh_total: DEMO.ssh.length, ssh_online: DEMO.ssh.reduce((a, u) => a + (u.status === 'disabled' ? 0 : u.online), 0),
       xray_total: DEMO.xray.length,
+      xray_online: DEMO.xray.reduce((a, u) => a + (u.status === 'disabled' ? 0 : (u.online || 0)), 0),
       xray_vless: DEMO.xray.filter(u => u.proto === 'vless').length,
       xray_vmess: DEMO.xray.filter(u => u.proto === 'vmess').length,
       xray_trojan: DEMO.xray.filter(u => u.proto === 'trojan').length,
@@ -515,32 +516,31 @@
 
   let csrfToken = '';
   async function api(path, opts = {}) {
-    if (!DEMO.active && !window.ALYAN_FORCE_DEMO && location.protocol !== 'file:') {
-      try {
-        const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
-        if (csrfToken && opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
-        const res = await fetch('/api' + path, {
-          method: opts.method || 'GET', headers,
-          body: opts.body ? JSON.stringify(opts.body) : undefined, credentials: 'same-origin'
-        });
-        if (res.status === 401 && path !== '/auth/login') {
-          showLogin();
-          const uerr = new Error('Session expired');
-          uerr.httpStatus = 401;
-          throw uerr;
-        }
-        const data = await res.json();
-        if (!res.ok) {
-          const herr = new Error(data.detail || data.error || 'Request failed');
-          herr.httpStatus = res.status;
-          throw herr;
-        }
-        if (data.csrf) csrfToken = data.csrf;
-        return data;
-      } catch (e) {
-        if (e && e.httpStatus && e.httpStatus !== 404) throw e;
-        if (path === '/auth/me') DEMO.active = true; else if (!DEMO.active) throw e;
+    const useDemo = Boolean(window.ALYAN_FORCE_DEMO || location.protocol === 'file:');
+    if (!useDemo) {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+      if (csrfToken && opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
+      const res = await fetch('/api' + path, {
+        method: opts.method || 'GET',
+        headers,
+        cache: 'no-store',
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+        credentials: 'same-origin'
+      });
+      if (res.status === 401 && path !== '/auth/login') {
+        showLogin();
+        const uerr = new Error('Session expired');
+        uerr.httpStatus = 401;
+        throw uerr;
       }
+      const data = await res.json();
+      if (!res.ok) {
+        const herr = new Error(data.detail || data.error || 'Request failed');
+        herr.httpStatus = res.status;
+        throw herr;
+      }
+      if (data.csrf) csrfToken = data.csrf;
+      return data;
     }
     DEMO.active = true;
     const b = opts.body || {};
@@ -594,7 +594,11 @@
       if (b.days) u.expiry = daysFromNow(+b.days);
       if (b.gb_limit !== undefined) u.gb_limit = +b.gb_limit;
       if (b.ip_limit !== undefined) u.ip_limit = +b.ip_limit;
-      logDemo('xray_edit', `proto=${u.proto} user=${u.username}`);
+      if (b.status) {
+        u.status = b.status;
+        if (b.status === 'disabled') { u.online = 0; u.ips = []; }
+      }
+      logDemo(b.status ? `xray_${b.status}` : 'xray_edit', `proto=${u.proto} user=${u.username}`);
       return { item: u, cfg: DEMO.cfg };
     }
     if (path.startsWith('/xray/') && opts.method === 'DELETE') {
@@ -809,7 +813,7 @@
             <div class="mod kpi" style="cursor:pointer" data-nav="xray">
               <div class="k">${ic('bolt')} XRAY MATRIX</div>
               <div class="v">${d.xray_total} <small>clients</small></div>
-              <div class="s"><span>VLESS <b>${d.xray_vless}</b></span><span>VMess <b>${d.xray_vmess}</b></span><span>Trojan <b>${d.xray_trojan}</b></span></div>
+              <div class="s"><span><i class="dot lit"></i> <b>${d.xray_online || 0}</b> live</span><span>VLESS <b>${d.xray_vless}</b></span><span>VMess <b>${d.xray_vmess}</b></span><span>Trojan <b>${d.xray_trojan}</b></span></div>
             </div>
             <div class="mod kpi" style="cursor:pointer" data-nav="engine">
               <div class="k">${ic('engine')} FLAME STACK</div>
@@ -898,43 +902,71 @@
         };
       });
     };
+    let coreBusy = false;
     await draw();
-    STATE.timer = setInterval(() => { if (STATE.bay === 'core' && !$('.ember.flip')) draw(); }, 5000);
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
+      coreBusy = true;
+      try { await draw(); } catch {} finally { coreBusy = false; }
+    }, 2000);
   }
 
-  /* ═════════════════════ 2. SSH ACCOUNTS (6-Corner SVG + Info Button) ═════════════════════ */
+  /* ═════════════════════ 2. SSH ACCOUNTS (6-Corner SVG + 2s Real-Time Sync) ═════════════════════ */
   async function renderTunnels() {
-    const { items, cfg } = await api('/ssh');
-    STATE.cfg = cfg; syncHud();
-    const liveIps = items.flatMap(u => u.ips.map(ip => ({ user: u.username, ip })));
+    let items = [];
+    let sshBusy = false;
+
+    const sshSheetHtml = (liveIps) => liveIps.length
+      ? `<div class="tbl-wrap"><table><thead><tr><th>User</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty"><p>No active SSH-WS, SSL or Dropbear sessions right now.</p></div>`;
+
+    const initData = await api('/ssh');
+    items = initData.items || [];
+    STATE.cfg = initData.cfg; syncHud();
+
+    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, ip })));
+
     setBayHead(
       'SSH · WS · SSL',
       'SSH Accounts',
-      `Direct (22, 109, 143) · SSL (443) · WebSocket (80/443 → ${cfg.ws_path || '/alyan'})`,
-      `<button class="btn sm" id="btnLiveIps">${ic('wifi')}<span>Connected IPs (${liveIps.length})</span></button>
+      `Direct (22, 109, 143) · SSL (443) · WebSocket (80/443 → ${STATE.cfg.ws_path || '/alyan'})`,
+      `<button class="btn sm" id="btnLiveIps">${ic('wifi')}<span id="btnLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
        <button class="btn btn-flame sm" id="btnAddSsh">${ic('plus')}<span>Create SSH Account</span></button>`
     );
     $('#btnAddSsh').onclick = () => openSshForm();
-    $('#btnLiveIps').onclick = () => openSheet('Live Connected IPs', 'REAL-IP CORRELATOR', liveIps.length
-      ? `<div class="tbl-wrap"><table><thead><tr><th>User</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td>${esc(r.user)}</td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
-      : `<div class="empty"><p>No active SSH-WS or Dropbear sessions right now.</p></div>`);
+    $('#btnLiveIps').onclick = () => openSheet('Live Connected SSH IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="sshLiveSheetBody">${sshSheetHtml(getLiveIps())}</div>`);
 
-    const filtered = items.filter(u => u.username.toLowerCase().includes(STATE.searchSsh.toLowerCase()));
     $('#view').innerHTML = `
       <div class="toolbar">
         <div class="search">${ic('search')}<input id="sshSearch" placeholder="Search SSH account…" value="${esc(STATE.searchSsh)}"/></div>
-        <span class="live"><i class="dot lit"></i> ${items.length} accounts · live 5s</span>
+        <span class="live" id="sshLiveMeta"><i class="dot lit"></i> ${items.length} accounts · live 2s</span>
       </div>
-      ${filtered.length ? `<div class="cards">${filtered.map(u => {
+      <div id="sshCardsHost"></div>`;
+
+    const paintCards = () => {
+      const host = $('#sshCardsHost');
+      if (!host || $('.acc.is-disintegrating', host)) return;
+      const liveIps = getLiveIps();
+      const liveBtnTxt = $('#btnLiveIpsTxt');
+      if (liveBtnTxt) liveBtnTxt.textContent = `Connected IPs (${liveIps.length})`;
+      const liveMeta = $('#sshLiveMeta');
+      if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${items.length} accounts · live 2s`;
+      const openModalBody = $('#sshLiveSheetBody');
+      if (openModalBody) openModalBody.innerHTML = sshSheetHtml(liveIps);
+
+      const filtered = items.filter(u => u.username.toLowerCase().includes(STATE.searchSsh.toLowerCase()));
+      host.innerHTML = filtered.length ? `<div class="cards">${filtered.map(u => {
         const isDis = u.status === 'disabled';
+        const ipList = isDis ? [] : (u.ips || []);
+        const onlineCnt = isDis ? 0 : (u.online || ipList.length || 0);
         const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
-          : `<span class="pill ${u.online ? 'lit' : ''}"><i class="dot ${u.online ? 'lit' : ''}"></i>${u.online ? u.online + ' online' : 'offline'}</span>`;
+          : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
-            ${hexAvatar(u.username[0].toUpperCase(), !isDis && u.online > 0)}
+            ${hexAvatar(u.username[0].toUpperCase(), !isDis && onlineCnt > 0)}
             <div>
               <div class="acc-n">${esc(u.username)} ${badgeHtml}</div>
               <div class="acc-m">owner <b>${esc(u.owner)}</b> · exp <b>${esc(u.expiry)}</b> (${daysLeft(u.expiry)}d)</div>
@@ -944,10 +976,9 @@
             <div class="meter-h"><span>DATA QUOTA</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
-          <div class="acc-stats">
+          <div class="acc-stats cols2">
             <div class="st"><span>IP LIMIT</span><b>${u.ip_limit > 0 ? u.ip_limit + ' IP' : 'Unlimited'}</b></div>
-            <div class="st"><span>LIVE IPS</span><b>${isDis ? '—' : (u.ips.length || '—')}</b></div>
-            <div class="st"><span>WS PATH</span><b>/alyan</b></div>
+            <div class="st" title="${esc(ipList.join(', '))}"><span>LIVE IPS</span><b>${ipList.length}</b></div>
           </div>
           <div class="acc-act">
             <button class="btn sm btn-flame" data-ticket="${esc(u.username)}"><span>Info</span></button>
@@ -956,32 +987,49 @@
             <button class="icon-btn sm danger" title="Delete" data-del="${esc(u.username)}">${ic('trash')}</button>
           </div>
         </article>`;
-      }).join('')}</div>` : `<div class="mod empty">${ic('tunnel')}<p>No matching SSH accounts found.</p></div>`}`;
+      }).join('')}</div>` : `<div class="mod empty">${ic('tunnel')}<p>No matching SSH accounts found.</p></div>`;
 
-    $('#sshSearch').oninput = (e) => { STATE.searchSsh = e.target.value; renderTunnels(); };
-    $$('[data-ticket]', $('#view')).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.ticket); if (u) showSshTicket(u); }; });
-    $$('[data-toggle]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
-        try {
-          await api(`/ssh/${encodeURIComponent(b.dataset.toggle)}`, { method: 'PATCH', body: { status: nextStatus } });
-          toast(`SSH account ${b.dataset.toggle} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
-          renderTunnels();
-        } catch (err) { toast(err.message, 'err'); }
-      };
-    });
-    $$('[data-edit]', $('#view')).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.edit); if (u) openSshForm(u); }; });
-    $$('[data-del]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const card = b.closest('.acc');
-        try {
-          await api(`/ssh/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
-          toast(`Deleted SSH account ${b.dataset.del}`);
-          await nanoDisintegrate(card);
-          renderTunnels();
-        } catch (err) { toast(err.message, 'err'); }
-      };
-    });
+      $$('[data-ticket]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.ticket); if (u) showSshTicket(u); }; });
+      $$('[data-toggle]', host).forEach(b => {
+        b.onclick = async () => {
+          const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
+          try {
+            await api(`/ssh/${encodeURIComponent(b.dataset.toggle)}`, { method: 'PATCH', body: { status: nextStatus } });
+            toast(`SSH account ${b.dataset.toggle} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
+            const fresh = await api('/ssh');
+            items = fresh.items || [];
+            paintCards();
+          } catch (err) { toast(err.message, 'err'); }
+        };
+      });
+      $$('[data-edit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.edit); if (u) openSshForm(u); }; });
+      $$('[data-del]', host).forEach(b => {
+        b.onclick = async () => {
+          const card = b.closest('.acc');
+          try {
+            await api(`/ssh/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
+            toast(`Deleted SSH account ${b.dataset.del}`);
+            await nanoDisintegrate(card);
+            items = items.filter(x => x.username !== b.dataset.del);
+            paintCards();
+          } catch (err) { toast(err.message, 'err'); }
+        };
+      });
+    };
+
+    $('#sshSearch').oninput = (e) => { STATE.searchSsh = e.target.value; paintCards(); };
+    paintCards();
+
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'tunnels' || document.hidden || sshBusy || $('.acc.is-disintegrating')) return;
+      sshBusy = true;
+      try {
+        const res = await api('/ssh');
+        items = res.items || [];
+        STATE.cfg = res.cfg;
+        paintCards();
+      } catch {} finally { sshBusy = false; }
+    }, 2000);
   }
 
   function showSshTicket(u) {
@@ -1043,38 +1091,77 @@
     };
   }
 
-  /* ═════════════════════ 3. XRAY (6-Corner SVG Hexagon) ═════════════════════ */
+  /* ═════════════════════ 3. XRAY (6-Corner SVG Hexagon + 2s Real-Time Sync) ═════════════════════ */
   async function renderXray() {
-    const { items, cfg } = await api('/xray');
-    STATE.cfg = cfg; syncHud();
-    setBayHead(
-      'XRAY CORE',
-      'Xray',
-      'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
-      `<button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
-    );
-    $('#btnAddXray').onclick = () => openXrayForm(STATE.xrayProto);
-
+    let items = [];
+    let xrayBusy = false;
     const protos = ['vless', 'vmess', 'trojan'];
-    const pIdx = protos.indexOf(STATE.xrayProto);
-    const list = items.filter(u => u.proto === STATE.xrayProto && u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
 
+    const xraySheetHtml = (liveIps) => liveIps.length
+      ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.proto)}</td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty"><p>No active VLESS, VMess or Trojan sessions right now.</p></div>`;
+
+    const initData = await api('/xray');
+    items = initData.items || [];
+    STATE.cfg = initData.cfg; syncHud();
+
+    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
+
+    const syncBayHeader = () => {
+      setBayHead(
+        'XRAY CORE',
+        'Xray',
+        'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
+        `<button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
+         <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
+      );
+      $('#btnAddXray').onclick = () => openXrayForm(STATE.xrayProto);
+      $('#btnXrayLiveIps').onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
+    };
+    syncBayHeader();
+
+    const pIdxInit = protos.indexOf(STATE.xrayProto);
     $('#view').innerHTML = `
       <div class="toolbar">
         <div class="seg" id="xraySeg">
-          <span class="seg-ind" style="left:calc(${pIdx * 33.333}% + 4px);width:calc(33.333% - 8px)"></span>
+          <span class="seg-ind" id="xraySegInd" style="left:calc(${pIdxInit * 33.333}% + 4px);width:calc(33.333% - 8px)"></span>
           ${protos.map(p => `<button type="button" class="${p === STATE.xrayProto ? 'on' : ''}" data-xp="${p}">${p.toUpperCase()}</button>`).join('')}
         </div>
         <div class="search">${ic('search')}<input id="xraySearch" placeholder="Search ${STATE.xrayProto.toUpperCase()} client…" value="${esc(STATE.searchXray)}"/></div>
+        <span class="live" id="xrayLiveMeta"><i class="dot lit"></i> 0 clients · live 2s</span>
       </div>
-      ${list.length ? `<div class="cards">${list.map(u => {
+      <div id="xrayCardsHost"></div>`;
+
+    const paintXrayCards = () => {
+      const host = $('#xrayCardsHost');
+      if (!host || $('.acc.is-disintegrating', host)) return;
+      const liveIps = getLiveIps();
+      const liveBtnTxt = $('#btnXrayLiveIpsTxt');
+      if (liveBtnTxt) liveBtnTxt.textContent = `Connected IPs (${liveIps.length})`;
+      const openModalBody = $('#xrayLiveSheetBody');
+      if (openModalBody) openModalBody.innerHTML = xraySheetHtml(liveIps);
+
+      const protoAll = items.filter(u => u.proto === STATE.xrayProto);
+      const liveMeta = $('#xrayLiveMeta');
+      if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${protoAll.length} clients · live 2s`;
+
+      const list = protoAll.filter(u => u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
+      host.innerHTML = list.length ? `<div class="cards">${list.map(u => {
+        const isDis = u.status === 'disabled';
+        const ipList = isDis ? [] : (u.ips || []);
+        const onlineCnt = isDis ? 0 : (ipList.length || u.online || 0);
         const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
+        const badgeHtml = isDis
+          ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
+          : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
+        const wsPath = `/alyan-${u.proto}`;
         return `
-        <article class="mod acc">
+        <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
-            ${hexAvatar(u.username[0].toUpperCase(), true)}
+            ${hexAvatar(u.username[0].toUpperCase(), !isDis && onlineCnt > 0)}
             <div>
-              <div class="acc-n">${esc(u.username)} <span class="pill ${u.online ? 'lit' : ''}">${u.online ? 'online' : 'idle'}</span></div>
+              <div class="acc-n">${esc(u.username)} ${badgeHtml}</div>
+              <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · cap <b>${u.ip_limit > 0 ? u.ip_limit + ' IP' : 'Unlimited'}</b> · exp <b>${esc(u.expiry)}</b></div>
               <div class="uuid" data-cpuuid="${esc(u.uuid)}">${esc(u.uuid.slice(0, 18))}… ${ic('copy')}</div>
             </div>
           </div>
@@ -1083,34 +1170,75 @@
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats">
-            <div class="st"><span>PROTOCOL</span><b>${esc(u.proto.toUpperCase())}</b></div>
-            <div class="st"><span>IP CAP</span><b>${u.ip_limit || '∞'}</b></div>
+            <div class="st" title="${esc(ipList.join(', '))}"><span>LIVE IPS</span><b>${onlineCnt}</b></div>
+            <div class="st" title="${esc(wsPath)}"><span>WS PATH</span><b>${esc(wsPath)}</b></div>
             <div class="st"><span>EXPIRY</span><b>${daysLeft(u.expiry)}d</b></div>
           </div>
           <div class="acc-act">
             <button class="btn sm btn-flame" data-xlinks="${esc(u.uuid)}">${ic('qr')}<span>Links &amp; QR</span></button>
+            <button class="btn sm ${isDis ? 'btn-toggle-on' : 'btn-toggle-off'}" title="${isDis ? 'Enable client' : 'Disable client'}" data-xtoggle="${esc(u.uuid)}" data-dis="${isDis ? '1' : '0'}">${ic(isDis ? 'check' : 'power')}<span>${isDis ? 'Enable' : 'Disable'}</span></button>
             <button class="icon-btn sm" title="Edit client" data-xedit="${esc(u.uuid)}">${ic('edit')}</button>
             <button class="icon-btn sm danger" title="Delete" data-xdel="${esc(u.uuid)}">${ic('trash')}</button>
           </div>
         </article>`;
-      }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${STATE.xrayProto.toUpperCase()} accounts yet. Click Create above.</p></div>`}`;
+      }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${STATE.xrayProto.toUpperCase()} accounts yet. Click Create above.</p></div>`;
 
-    $$('[data-xp]', $('#xraySeg')).forEach(b => { b.onclick = () => { STATE.xrayProto = b.dataset.xp; renderXray(); }; });
-    $('#xraySearch').oninput = (e) => { STATE.searchXray = e.target.value; renderXray(); };
-    $$('[data-cpuuid]', $('#view')).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
-    $$('[data-xlinks]', $('#view')).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xlinks); if (u) showXrayLinks(u); }; });
-    $$('[data-xedit]', $('#view')).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xedit); if (u) openXrayForm(u.proto, u); }; });
-    $$('[data-xdel]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const card = b.closest('.acc');
-        try {
-          await api(`/xray/${encodeURIComponent(b.dataset.xdel)}`, { method: 'DELETE' });
-          toast('Xray client removed');
-          await nanoDisintegrate(card);
-          renderXray();
-        } catch (err) { toast(err.message, 'err'); }
+      $$('[data-cpuuid]', host).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
+      $$('[data-xlinks]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xlinks); if (u) showXrayLinks(u); }; });
+      $$('[data-xtoggle]', host).forEach(b => {
+        b.onclick = async () => {
+          const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
+          try {
+            const target = items.find(x => x.uuid === b.dataset.xtoggle);
+            await api(`/xray/${encodeURIComponent(b.dataset.xtoggle)}`, { method: 'PATCH', body: { status: nextStatus } });
+            toast(`${target ? target.username : 'Xray client'} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
+            const fresh = await api('/xray');
+            items = fresh.items || [];
+            paintXrayCards();
+          } catch (err) { toast(err.message, 'err'); }
+        };
+      });
+      $$('[data-xedit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xedit); if (u) openXrayForm(u.proto, u); }; });
+      $$('[data-xdel]', host).forEach(b => {
+        b.onclick = async () => {
+          const card = b.closest('.acc');
+          try {
+            await api(`/xray/${encodeURIComponent(b.dataset.xdel)}`, { method: 'DELETE' });
+            toast('Xray client removed');
+            await nanoDisintegrate(card);
+            items = items.filter(x => x.uuid !== b.dataset.xdel);
+            paintXrayCards();
+          } catch (err) { toast(err.message, 'err'); }
+        };
+      });
+    };
+
+    $$('[data-xp]', $('#xraySeg')).forEach(b => {
+      b.onclick = () => {
+        STATE.xrayProto = b.dataset.xp;
+        const idx = protos.indexOf(STATE.xrayProto);
+        const ind = $('#xraySegInd');
+        if (ind) ind.style.left = `calc(${idx * 33.333}% + 4px)`;
+        $$('[data-xp]', $('#xraySeg')).forEach(x => x.classList.toggle('on', x.dataset.xp === STATE.xrayProto));
+        const inp = $('#xraySearch');
+        if (inp) inp.placeholder = `Search ${STATE.xrayProto.toUpperCase()} client…`;
+        syncBayHeader();
+        paintXrayCards();
       };
     });
+    $('#xraySearch').oninput = (e) => { STATE.searchXray = e.target.value; paintXrayCards(); };
+    paintXrayCards();
+
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
+      xrayBusy = true;
+      try {
+        const res = await api('/xray');
+        items = res.items || [];
+        STATE.cfg = res.cfg;
+        paintXrayCards();
+      } catch {} finally { xrayBusy = false; }
+    }, 2000);
   }
 
   function showXrayLinks(u) {
@@ -1139,7 +1267,7 @@
     openSheet(existing ? `Edit ${existing.username} (${curProto.toUpperCase()})` : `Create ${curProto.toUpperCase()} Client`, existing ? 'EDIT XRAY CLIENT' : 'XRAY HOT-PROVISION', `
       <form class="stack" id="xrayForm">
         <div class="row2">
-          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" value="${existing ? esc(existing.username) : ''}" placeholder="AlyanVIP"/></label>
+          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" value="${existing ? esc(existing.username) : ''}" placeholder="Alyan"/></label>
           <label class="field"><span>Protocol</span>
             <select name="proto">
               <option value="vless" ${curProto==='vless'?'selected':''}>VLESS</option>
@@ -1183,9 +1311,9 @@
   }
 
 
-  /* ═════════════════════ 4. ENGINE (Services & Listening Ports · Ping) ═════════════════════ */
+  /* ═════════════════════ 4. ENGINE (Services & Listening Ports · Ping · 2s Sync) ═════════════════════ */
   async function renderEngine() {
-    const { services, ports } = await api('/engine');
+    let engBusy = false;
     setBayHead(
       'DAEMONS & PORTS',
       'Engine',
@@ -1193,97 +1321,107 @@
       `<button class="btn sm" id="btnRefreshEng">${ic('refresh')}<span>Refresh</span></button>
        <button class="btn btn-flame sm" id="btnRestartAll">${ic('bolt')}<span>Restart Full Stack</span></button>`
     );
-    $('#btnRefreshEng').onclick = renderEngine;
+
+    const drawEngine = async () => {
+      const { services, ports } = await api('/engine');
+      const pubPorts = ports.filter(p => p.scope === 'public');
+      const locPorts = ports.filter(p => p.scope !== 'public');
+
+      $('#view').innerHTML = `
+        <div class="grid g2">
+          <section class="mod" style="padding:18px 18px 8px">
+            <div class="mod-h">
+              <h3>${ic('engine')} System Daemons</h3>
+              <span class="sub">${services.filter(s => s.status === 'running').length}/${services.length} running · live 2s</span>
+            </div>
+            <div>
+              ${services.map(s => `
+                <div class="svc ${s.status === 'running' ? 'on' : ''}">
+                  <div class="svc-ic">${ic(s.id.includes('xray') ? 'bolt' : s.id.includes('bot') ? 'send' : s.id.includes('qos') ? 'wifi' : 'engine')}</div>
+                  <div>
+                    <div class="svc-n">${esc(s.name)} <span class="pill ${s.status === 'running' ? 'lit' : 'fire'}">${esc(s.status)}</span></div>
+                    <div class="svc-m"><span>${esc(s.desc)}</span><span>mem ${esc(s.mem)}</span><span>up ${esc(s.uptime)}</span></div>
+                  </div>
+                  <div class="svc-a">
+                    <button class="switch ${s.status === 'running' ? 'on' : ''}" title="${s.status === 'running' ? 'Stop' : 'Start'}" data-svctog="${esc(s.id)}" data-run="${s.status === 'running' ? '1' : '0'}"></button>
+                    <button class="icon-btn sm" title="Restart" data-svcrst="${esc(s.id)}">${ic('refresh')}</button>
+                    <button class="icon-btn sm" title="Logs" data-svclog="${esc(s.id)}">${ic('terminal')}</button>
+                  </div>
+                </div>`).join('')}
+            </div>
+          </section>
+
+          <section class="mod">
+            <div class="mod-h">
+              <h3>${ic('globe')} Live Listening TCP Ports</h3>
+              <span class="sub">${ports.length} bound sockets</span>
+            </div>
+            <div class="port-groups">
+              <div class="pg">
+                <h4>Public Internet · 0.0.0.0</h4>
+                <div class="port-chips">
+                  ${pubPorts.map(p => `<div class="pc pub"><b>:${p.port}</b><span>${esc(p.note)}</span><em>${esc(p.proc)}</em></div>`).join('')}
+                </div>
+              </div>
+              <div class="pg">
+                <h4>Internal Loopback · 127.0.0.1</h4>
+                <div class="port-chips">
+                  ${locPorts.map(p => `<div class="pc"><b>:${p.port}</b><span>${esc(p.note)}</span><em>${esc(p.proc)}</em></div>`).join('')}
+                </div>
+              </div>
+              <div class="tbl-wrap">
+                <table>
+                  <thead><tr><th>Port</th><th>Bind</th><th>Daemon</th><th>Role</th></tr></thead>
+                  <tbody>
+                    ${ports.map(p => `<tr><td><b>${p.port}</b></td><td>${esc(p.addr)}</td><td>${esc(p.proc)}</td><td>${esc(p.note)}</td></tr>`).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </div>`;
+
+      $$('[data-svctog]', $('#view')).forEach(b => {
+        b.onclick = async () => {
+          const act = b.dataset.run === '1' ? 'stop' : 'start';
+          await api(`/service/${b.dataset.svctog}/${act}`, { method: 'POST' });
+          toast(`${b.dataset.svctog}: ${act}`);
+          drawEngine();
+        };
+      });
+      $$('[data-svcrst]', $('#view')).forEach(b => {
+        b.onclick = async () => {
+          await api(`/service/${b.dataset.svcrst}/restart`, { method: 'POST' });
+          toast(`${b.dataset.svcrst}: restarted`);
+          drawEngine();
+        };
+      });
+      $$('[data-svclog]', $('#view')).forEach(b => {
+        b.onclick = async () => {
+          const r = await api(`/service/${b.dataset.svclog}/logs`);
+          openSheet(`${b.dataset.svclog} · Logs`, 'JOURNAL STREAM', `<pre class="term">${esc(r.logs)}</pre>`);
+        };
+      });
+    };
+
+    $('#btnRefreshEng').onclick = drawEngine;
     $('#btnRestartAll').onclick = async () => {
       await api('/service/all/restart', { method: 'POST' });
       toast('Full tunneling stack restarted cleanly');
-      renderEngine();
+      drawEngine();
     };
-
-    const pubPorts = ports.filter(p => p.scope === 'public');
-    const locPorts = ports.filter(p => p.scope !== 'public');
-
-    $('#view').innerHTML = `
-      <div class="grid g2">
-        <section class="mod" style="padding:18px 18px 8px">
-          <div class="mod-h">
-            <h3>${ic('engine')} System Daemons</h3>
-            <span class="sub">${services.filter(s => s.status === 'running').length}/${services.length} running</span>
-          </div>
-          <div>
-            ${services.map(s => `
-              <div class="svc ${s.status === 'running' ? 'on' : ''}">
-                <div class="svc-ic">${ic(s.id.includes('xray') ? 'bolt' : s.id.includes('bot') ? 'send' : s.id.includes('qos') ? 'wifi' : 'engine')}</div>
-                <div>
-                  <div class="svc-n">${esc(s.name)} <span class="pill ${s.status === 'running' ? 'lit' : 'fire'}">${esc(s.status)}</span></div>
-                  <div class="svc-m"><span>${esc(s.desc)}</span><span>mem ${esc(s.mem)}</span><span>up ${esc(s.uptime)}</span></div>
-                </div>
-                <div class="svc-a">
-                  <button class="switch ${s.status === 'running' ? 'on' : ''}" title="${s.status === 'running' ? 'Stop' : 'Start'}" data-svctog="${esc(s.id)}" data-run="${s.status === 'running' ? '1' : '0'}"></button>
-                  <button class="icon-btn sm" title="Restart" data-svcrst="${esc(s.id)}">${ic('refresh')}</button>
-                  <button class="icon-btn sm" title="Logs" data-svclog="${esc(s.id)}">${ic('terminal')}</button>
-                </div>
-              </div>`).join('')}
-          </div>
-        </section>
-
-        <section class="mod">
-          <div class="mod-h">
-            <h3>${ic('globe')} Live Listening TCP Ports</h3>
-            <span class="sub">${ports.length} bound sockets</span>
-          </div>
-          <div class="port-groups">
-            <div class="pg">
-              <h4>Public Internet · 0.0.0.0</h4>
-              <div class="port-chips">
-                ${pubPorts.map(p => `<div class="pc pub"><b>:${p.port}</b><span>${esc(p.note)}</span><em>${esc(p.proc)}</em></div>`).join('')}
-              </div>
-            </div>
-            <div class="pg">
-              <h4>Internal Loopback · 127.0.0.1</h4>
-              <div class="port-chips">
-                ${locPorts.map(p => `<div class="pc"><b>:${p.port}</b><span>${esc(p.note)}</span><em>${esc(p.proc)}</em></div>`).join('')}
-              </div>
-            </div>
-            <div class="tbl-wrap">
-              <table>
-                <thead><tr><th>Port</th><th>Bind</th><th>Daemon</th><th>Role</th></tr></thead>
-                <tbody>
-                  ${ports.map(p => `<tr><td><b>${p.port}</b></td><td>${esc(p.addr)}</td><td>${esc(p.proc)}</td><td>${esc(p.note)}</td></tr>`).join('')}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      </div>`;
-
-    $$('[data-svctog]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const act = b.dataset.run === '1' ? 'stop' : 'start';
-        await api(`/service/${b.dataset.svctog}/${act}`, { method: 'POST' });
-        toast(`${b.dataset.svctog}: ${act}`);
-        renderEngine();
-      };
-    });
-    $$('[data-svcrst]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        await api(`/service/${b.dataset.svcrst}/restart`, { method: 'POST' });
-        toast(`${b.dataset.svcrst}: restarted`);
-        renderEngine();
-      };
-    });
-    $$('[data-svclog]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const r = await api(`/service/${b.dataset.svclog}/logs`);
-        openSheet(`${b.dataset.svclog} · Logs`, 'JOURNAL STREAM', `<pre class="term">${esc(r.logs)}</pre>`);
-      };
-    });
+    await drawEngine();
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'engine' || document.hidden || engBusy) return;
+      engBusy = true;
+      try { await drawEngine(); } catch {} finally { engBusy = false; }
+    }, 2000);
   }
 
-  /* ═════════════════════ 5. VPS INFO (Hardware, Metrics & Speedtest) ═════════════════════ */
+  /* ═════════════════════ 5. VPS INFO (Hardware, Metrics & Speedtest · 2s Sync) ═════════════════════ */
   async function renderTelemetry() {
-    const d = await api('/telemetry');
-    STATE.cfg = d.cfg; syncHud();
+    let telBusy = false;
+    let speedRunning = false;
     setBayHead(
       'SERVER SPECS & BENCHMARK',
       'VPS Info',
@@ -1291,74 +1429,91 @@
       `<button class="btn btn-flame sm" id="btnRunSpeed">${ic('bolt')}<span>Run Speedtest</span></button>`
     );
 
-    const spCpu = sparkPath(d.hist.cpu, 540, 175, 100);
-    const spRam = sparkPath(d.hist.ram, 540, 175, 100);
-    const st = d.speedtest;
-    const deg = Math.min(90, Math.max(-90, ((Math.min(1000, st.down) / 1000) * 180) - 90));
+    const drawTel = async () => {
+      const d = await api('/telemetry');
+      STATE.cfg = d.cfg; syncHud();
+      const spCpu = sparkPath(d.hist.cpu, 540, 175, 100);
+      const spRam = sparkPath(d.hist.ram, 540, 175, 100);
+      const st = d.speedtest;
+      const deg = Math.min(90, Math.max(-90, ((Math.min(1000, st.down) / 1000) * 180) - 90));
 
-    $('#view').innerHTML = `
-      <div class="grid g2">
-        <section class="mod">
-          <div class="mod-h"><h3>${ic('chart')} VPS Hardware &amp; Network Profile</h3><span class="pill lit">${esc(d.cfg.os)}</span></div>
-          <dl class="kv">
-            <dt>Domain / SNI</dt><dd>${esc(d.cfg.domain)}</dd>
-            <dt>Public IPv4</dt><dd>${esc(d.cfg.ip)}</dd>
-            <dt>Datacenter</dt><dd>${esc(d.cfg.location)} · ${esc(d.cfg.provider)}</dd>
-            <dt>CPU Model</dt><dd>${esc(d.cfg.cpu_model)}</dd>
-            <dt>Kernel</dt><dd>${esc(d.cfg.kernel)}</dd>
-            <dt>System Uptime</dt><dd>${esc(d.cfg.uptime)}</dd>
-            <dt>Memory</dt><dd>${fmtBytes(d.ram_used)} / ${fmtBytes(d.ram_total)} (${d.ram_pct}%)</dd>
-            <dt>Disk Volume</dt><dd>${fmtBytes(d.disk_used)} / ${fmtBytes(d.disk_total)} (${d.disk_pct}%)</dd>
-            <dt>Total Traffic</dt><dd>↓ ${fmtBytes(d.rx_total)} · ↑ ${fmtBytes(d.tx_total)}</dd>
-          </dl>
-        </section>
+      $('#view').innerHTML = `
+        <div class="grid g2">
+          <section class="mod">
+            <div class="mod-h"><h3>${ic('chart')} VPS Hardware &amp; Network Profile</h3><span class="pill lit">${esc(d.cfg.os)}</span></div>
+            <dl class="kv">
+              <dt>Domain / SNI</dt><dd>${esc(d.cfg.domain)}</dd>
+              <dt>Public IPv4</dt><dd>${esc(d.cfg.ip)}</dd>
+              <dt>Datacenter</dt><dd>${esc(d.cfg.location)} · ${esc(d.cfg.provider)}</dd>
+              <dt>CPU Model</dt><dd>${esc(d.cfg.cpu_model)}</dd>
+              <dt>Kernel</dt><dd>${esc(d.cfg.kernel)}</dd>
+              <dt>System Uptime</dt><dd>${esc(d.cfg.uptime)}</dd>
+              <dt>Memory</dt><dd>${fmtBytes(d.ram_used)} / ${fmtBytes(d.ram_total)} (${d.ram_pct}%)</dd>
+              <dt>Disk Volume</dt><dd>${fmtBytes(d.disk_used)} / ${fmtBytes(d.disk_total)} (${d.disk_pct}%)</dd>
+              <dt>Total Traffic</dt><dd>↓ ${fmtBytes(d.rx_total)} · ↑ ${fmtBytes(d.tx_total)}</dd>
+            </dl>
+          </section>
 
-        <section class="mod hot">
-          <div class="mod-h"><h3>${ic('bolt')} Flame Speedtest Gauge</h3><span class="sub" id="stRan">${esc(st.ran)}</span></div>
-          <div class="gauge">
-            <svg viewBox="0 0 220 124">
-              <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14" stroke-linecap="round"/>
-              <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="url(#gFlame)" stroke-width="14" stroke-linecap="round"
-                stroke-dasharray="276.5" stroke-dashoffset="${(276.5 * (1 - Math.min(1000, st.down) / 1000)).toFixed(1)}"/>
-              <g class="needle" id="stNeedle" style="transform:rotate(${deg.toFixed(1)}deg)">
-                <line x1="110" y1="110" x2="110" y2="34" stroke="#ffd36b" stroke-width="3" stroke-linecap="round"/>
-                <circle cx="110" cy="110" r="6" fill="#ff3b1f"/>
-              </g>
+          <section class="mod hot">
+            <div class="mod-h"><h3>${ic('bolt')} Flame Speedtest Gauge</h3><span class="sub" id="stRan">${esc(st.ran)}</span></div>
+            <div class="gauge">
+              <svg viewBox="0 0 220 124">
+                <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="14" stroke-linecap="round"/>
+                <path d="M 22 110 A 88 88 0 0 1 198 110" fill="none" stroke="url(#gFlame)" stroke-width="14" stroke-linecap="round"
+                  stroke-dasharray="276.5" stroke-dashoffset="${(276.5 * (1 - Math.min(1000, st.down) / 1000)).toFixed(1)}"/>
+                <g class="needle" id="stNeedle" style="transform:rotate(${deg.toFixed(1)}deg)">
+                  <line x1="110" y1="110" x2="110" y2="34" stroke="#ffd36b" stroke-width="3" stroke-linecap="round"/>
+                  <circle cx="110" cy="110" r="6" fill="#ff3b1f"/>
+                </g>
+              </svg>
+              <div class="g-val"><b id="stDownBig">${st.down}</b><span>Mbps Download · ${esc(st.isp)}</span></div>
+            </div>
+            <div class="st-res">
+              <div class="st"><span>PING</span><b id="stPing">${st.ping} ms</b></div>
+              <div class="st"><span>JITTER</span><b id="stJit">${st.jitter} ms</b></div>
+              <div class="st"><span>UPLOAD</span><b id="stUp">${st.up} Mbps</b></div>
+            </div>
+          </section>
+
+          <section class="mod span2">
+            <div class="mod-h"><h3>${ic('chart')} CPU &amp; Memory Load Curve</h3><span class="sub">Live 2s rolling window</span></div>
+            <div class="legend">
+              <span><i style="background:#ff2d2d"></i>CPU ${d.cpu_pct}%</span>
+              <span><i style="background:#ffb000"></i>RAM ${d.ram_pct}%</span>
+            </div>
+            <svg viewBox="0 0 540 175" preserveAspectRatio="none" class="chart">
+              <path d="${spCpu.area}" fill="rgba(255,45,45,.16)"/>
+              <path d="${spCpu.line}" fill="none" stroke="#ff2d2d" stroke-width="2.4"/>
+              <path d="${spRam.line}" fill="none" stroke="#ffb000" stroke-width="2" stroke-dasharray="5 4"/>
             </svg>
-            <div class="g-val"><b id="stDownBig">${st.down}</b><span>Mbps Download · ${esc(st.isp)}</span></div>
-          </div>
-          <div class="st-res">
-            <div class="st"><span>PING</span><b id="stPing">${st.ping} ms</b></div>
-            <div class="st"><span>JITTER</span><b id="stJit">${st.jitter} ms</b></div>
-            <div class="st"><span>UPLOAD</span><b id="stUp">${st.up} Mbps</b></div>
-          </div>
-        </section>
-
-        <section class="mod span2">
-          <div class="mod-h"><h3>${ic('chart')} CPU &amp; Memory Load Curve</h3><span class="sub">Rolling window</span></div>
-          <div class="legend">
-            <span><i style="background:#ff2d2d"></i>CPU ${d.cpu_pct}%</span>
-            <span><i style="background:#ffb000"></i>RAM ${d.ram_pct}%</span>
-          </div>
-          <svg viewBox="0 0 540 175" preserveAspectRatio="none" class="chart">
-            <path d="${spCpu.area}" fill="rgba(255,45,45,.16)"/>
-            <path d="${spCpu.line}" fill="none" stroke="#ff2d2d" stroke-width="2.4"/>
-            <path d="${spRam.line}" fill="none" stroke="#ffb000" stroke-width="2" stroke-dasharray="5 4"/>
-          </svg>
-        </section>
-      </div>`;
+          </section>
+        </div>`;
+    };
 
     $('#btnRunSpeed').onclick = async () => {
       const btn = $('#btnRunSpeed');
+      speedRunning = true;
       btn.disabled = true;
       btn.querySelector('span').textContent = 'Testing Line…';
       toast('Running live speedtest benchmark…');
       try {
         await api('/speedtest', { method: 'POST' });
         toast('Speedtest completed');
-        renderTelemetry();
-      } finally { btn.disabled = false; }
+        await drawTel();
+      } catch (err) { toast(err.message, 'err'); }
+      finally {
+        speedRunning = false;
+        btn.disabled = false;
+        if (btn.querySelector('span')) btn.querySelector('span').textContent = 'Run Speedtest';
+      }
     };
+
+    await drawTel();
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'telemetry' || document.hidden || telBusy || speedRunning) return;
+      telBusy = true;
+      try { await drawTel(); } catch {} finally { telBusy = false; }
+    }, 2000);
   }
 
   /* ═════════════════════ 6. SETTINGS (Domain, SSL, Port, Ping Stability, Banner, Auth) ═════════════════════ */
@@ -1665,32 +1820,50 @@
     };
   }
 
-  /* ═════════════════════ 9. LIST (Activity & Event List) ═════════════════════ */
+  /* ═════════════════════ 9. LIST (Activity & Event List · 2s Sync) ═════════════════════ */
   async function renderAudit() {
-    const { items } = await api('/audit');
+    let items = (await api('/audit')).items || [];
+    let auditBusy = false;
     setBayHead(
       'ACTIVITY STREAM',
       'List',
       'Chronological list of all account provisions, service actions, SSL updates & logins'
     );
-    const q = STATE.searchAudit.toLowerCase();
-    const list = items.filter(a => !q || `${a.user} ${a.action} ${a.detail} ${a.ip}`.toLowerCase().includes(q));
 
     $('#view').innerHTML = `
       <div class="toolbar">
         <div class="search">${ic('search')}<input id="auditSearch" placeholder="Filter list by user, action or IP…" value="${esc(STATE.searchAudit)}"/></div>
-        <span class="live"><i class="dot lit"></i> ${list.length} records</span>
+        <span class="live" id="auditLiveMeta"><i class="dot lit"></i> 0 records · live 2s</span>
       </div>
-      <section class="mod">
-        ${list.length ? list.map(a => `
-          <div class="log-item">
-            <div class="log-ic">${ic(a.action.includes('xray') ? 'bolt' : a.action.includes('ssh') ? 'tunnel' : 'list')}</div>
-            <div class="log-t"><b>${esc(a.action)}</b> &nbsp;<span>${esc(a.detail)}</span></div>
-            <div class="log-r"><div>${esc(a.user)} · ${esc(a.ip)}</div><div>${esc(a.time)}</div></div>
-          </div>`).join('') : `<div class="empty"><p>No matching entries in list.</p></div>`}
-      </section>`;
+      <section class="mod" id="auditListHost"></section>`;
 
-    $('#auditSearch').oninput = (e) => { STATE.searchAudit = e.target.value; renderAudit(); };
+    const paintAudit = () => {
+      const host = $('#auditListHost');
+      if (!host) return;
+      const q = STATE.searchAudit.toLowerCase();
+      const list = items.filter(a => !q || `${a.user} ${a.action} ${a.detail} ${a.ip}`.toLowerCase().includes(q));
+      const meta = $('#auditLiveMeta');
+      if (meta) meta.innerHTML = `<i class="dot lit"></i> ${list.length} records · live 2s`;
+      host.innerHTML = list.length ? list.map(a => `
+        <div class="log-item">
+          <div class="log-ic">${ic(a.action.includes('xray') ? 'bolt' : a.action.includes('ssh') ? 'tunnel' : 'list')}</div>
+          <div class="log-t"><b>${esc(a.action)}</b> &nbsp;<span>${esc(a.detail)}</span></div>
+          <div class="log-r"><div>${esc(a.user)} · ${esc(a.ip)}</div><div>${esc(a.time)}</div></div>
+        </div>`).join('') : `<div class="empty"><p>No matching entries in list.</p></div>`;
+    };
+
+    $('#auditSearch').oninput = (e) => { STATE.searchAudit = e.target.value; paintAudit(); };
+    paintAudit();
+
+    STATE.timer = setInterval(async () => {
+      if (STATE.bay !== 'audit' || document.hidden || auditBusy) return;
+      auditBusy = true;
+      try {
+        const res = await api('/audit');
+        items = res.items || [];
+        paintAudit();
+      } catch {} finally { auditBusy = false; }
+    }, 2000);
   }
 
   /* ═════════════════════ FLAME LAUNCHER & COMMAND PALETTE ═════════════════════ */

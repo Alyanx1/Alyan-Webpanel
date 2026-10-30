@@ -29,6 +29,35 @@ HTTP_101_RESPONSE = (
 )
 
 ACTIVE_SESSIONS = {}
+RECENT_CLOSED = {}
+
+
+def flush_state_now():
+    try:
+        now = time.time()
+        for k in list(RECENT_CLOSED.keys()):
+            if now - RECENT_CLOSED[k].get("closed_at", 0) > 15.0:
+                del RECENT_CLOSED[k]
+        snapshot = {}
+        for port, s in list(RECENT_CLOSED.items()):
+            snapshot[port] = {
+                "ip": s["ip"],
+                "since": s["since"],
+                "bytes": s["bytes"],
+                "closed": True,
+            }
+        for port, s in list(ACTIVE_SESSIONS.items()):
+            snapshot[port] = {
+                "ip": s["ip"],
+                "since": s["since"],
+                "bytes": s["rx"] + s["tx"],
+                "closed": False,
+            }
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(snapshot), encoding="utf-8")
+        tmp.replace(STATE_FILE)
+    except Exception:
+        pass
 
 
 def parse_proxy_header(buf: bytes):
@@ -137,9 +166,9 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
             hdr_text = payload.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
             for line in hdr_text.splitlines():
                 low = line.lower()
-                if low.startswith("cf-connecting-ip:") or low.startswith("x-real-ip:"):
-                    cand = line.split(":", 1)[1].strip()
-                    if cand:
+                if low.startswith(("cf-connecting-ip:", "x-real-ip:", "x-forwarded-for:")):
+                    cand = line.split(":", 1)[1].split(",")[0].strip()
+                    if cand and cand not in ("127.0.0.1", "::1"):
                         real_ip = cand
                         break
 
@@ -162,6 +191,7 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
             "flushed": 0,
         }
         ACTIVE_SESSIONS[local_port] = stat_entry
+        flush_state_now()
 
         if tail:
             # Handle optional second HTTP split header before SSH-2.0-
@@ -184,26 +214,20 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
             pass
     finally:
         if local_port and local_port in ACTIVE_SESSIONS:
-            del ACTIVE_SESSIONS[local_port]
+            st = ACTIVE_SESSIONS.pop(local_port)
+            RECENT_CLOSED[local_port] = {
+                "ip": st["ip"],
+                "since": st["since"],
+                "bytes": st["rx"] + st["tx"],
+                "closed_at": time.time(),
+            }
+            flush_state_now()
 
 
 async def flush_sessions_loop():
     while True:
-        try:
-            tmp = STATE_FILE.with_suffix(".tmp")
-            snapshot = {
-                port: {
-                    "ip": s["ip"],
-                    "since": s["since"],
-                    "bytes": s["rx"] + s["tx"],
-                }
-                for port, s in list(ACTIVE_SESSIONS.items())
-            }
-            tmp.write_text(json.dumps(snapshot), encoding="utf-8")
-            tmp.replace(STATE_FILE)
-        except Exception:
-            pass
-        await asyncio.sleep(2.5)
+        flush_state_now()
+        await asyncio.sleep(1.5)
 
 
 async def main():

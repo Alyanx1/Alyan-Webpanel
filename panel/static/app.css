@@ -490,9 +490,10 @@ a { color: var(--amber); }
 .bar i { display: block; height: 100%; border-radius: 99px; background: var(--flame-h); box-shadow: 0 0 10px rgba(255, 80, 0, .6); }
 .bar.inf i { background: repeating-linear-gradient(-45deg, rgba(255, 106, 0, .55) 0 6px, rgba(255, 106, 0, .2) 6px 12px); background-size: 17px 17px; }
 .acc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.st { padding: 8px 10px; border-radius: 12px; background: rgba(255,255,255,.025); border: 1px solid var(--line); display: grid; gap: 1px; }
+.acc-stats.cols2 { grid-template-columns: repeat(2, 1fr); }
+.st { padding: 8px 10px; border-radius: 12px; background: rgba(255,255,255,.025); border: 1px solid var(--line); display: grid; gap: 1px; min-width: 0; }
 .st span { font: 600 10.5px var(--f-display); letter-spacing: .12em; color: var(--dim); text-transform: uppercase; }
-.st b { font: 600 13px var(--f-mono); }
+.st b { font: 600 12.5px var(--f-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acc-act { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .uuid { display: inline-flex; align-items: center; gap: 6px; font: 500 11.5px var(--f-mono); color: var(--muted); cursor: pointer; }
 .uuid:hover { color: var(--amber); }

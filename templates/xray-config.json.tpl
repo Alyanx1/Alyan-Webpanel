@@ -144,7 +144,7 @@
       },
       "streamSettings": {
         "network": "tcp",
-        "sockopt": {
+        "tcpSettings": {
           "acceptProxyProtocol": true
         }
       }

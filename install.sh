@@ -136,6 +136,90 @@ fetch_asset() {
   sed -i 's/\r$//' "$dst" 2>/dev/null || true
 }
 
+deploy_project_files() {
+  mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,qos,systemd},templates}
+
+  local local_check=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    local_check="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  fi
+  if [[ -z "$local_check" || ! -f "${local_check}/core/alyan-ctl" ]]; then
+    BUNDLE_DIR="/tmp/alyan-bundle-src"
+    rm -rf "$BUNDLE_DIR"
+    if [[ -n "${ALYAN_GH_TOKEN:-}" ]]; then
+      git clone --depth 1 "https://x-access-token:${ALYAN_GH_TOKEN}@github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || \
+      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
+    else
+      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
+    fi
+  fi
+
+  fetch_asset "install.sh"                       "${INSTALL_DIR}/install.sh" || true
+  fetch_asset "core/alyan-ctl"                   "${INSTALL_DIR}/core/alyan-ctl"
+  fetch_asset "services/wsd/alyan-wsd.py"        "${INSTALL_DIR}/services/wsd/alyan-wsd.py"
+  fetch_asset "services/guard/alyan-guard.py"    "${INSTALL_DIR}/services/guard/alyan-guard.py"
+  fetch_asset "services/qos/alyan-qos.sh"        "${INSTALL_DIR}/services/qos/alyan-qos.sh"
+  fetch_asset "templates/haproxy.cfg.tpl"        "${INSTALL_DIR}/templates/haproxy.cfg.tpl"
+  fetch_asset "templates/nginx-router.conf.tpl"  "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
+  fetch_asset "templates/nginx-panel.conf.tpl"   "${INSTALL_DIR}/templates/nginx-panel.conf.tpl"
+  fetch_asset "templates/xray-config.json.tpl"   "${INSTALL_DIR}/templates/xray-config.json.tpl"
+  fetch_asset "cli/menu.sh"                      "${INSTALL_DIR}/cli/menu.sh"
+  fetch_asset "panel/app.py"                     "${INSTALL_DIR}/panel/app.py"
+  fetch_asset "panel/static/index.html"          "${INSTALL_DIR}/panel/static/index.html"
+  fetch_asset "panel/static/app.css"             "${INSTALL_DIR}/panel/static/app.css"
+  fetch_asset "panel/static/app.js"              "${INSTALL_DIR}/panel/static/app.js"
+  fetch_asset "bot/alyan-bot.py"                 "${INSTALL_DIR}/bot/alyan-bot.py"
+  for unit in alyan-wsd alyan-guard alyan-qos alyan-panel alyan-bot; do
+    fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
+  done
+  rm -rf "/tmp/alyan-bundle-src"
+  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/qos/alyan-qos.sh" 2>/dev/null || true
+  ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
+  ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
+}
+
+ensure_panel_service_user() {
+  id -u _alyanpanel &>/dev/null || useradd -r -s /usr/sbin/nologin -d /opt/alyan _alyanpanel
+  # Clean up legacy system user 'alyan' or unmanaged ghost user 'Alyan'/'alyan' not tracked in SQLite
+  for ghost in alyan Alyan; do
+    if id -u "$ghost" &>/dev/null; then
+      local in_db="0"
+      if [[ -f "${VAR_DIR}/alyan.db" ]]; then
+        in_db=$(sqlite3 "${VAR_DIR}/alyan.db" "SELECT COUNT(*) FROM ssh_users WHERE LOWER(username)=LOWER('${ghost}');" 2>/dev/null || echo "0")
+      fi
+      if [[ "$in_db" == "0" ]]; then
+        pkill -KILL -u "$ghost" 2>/dev/null || true
+        userdel -f "$ghost" 2>/dev/null || true
+      fi
+    fi
+  done
+  chown -R _alyanpanel:_alyanpanel "${INSTALL_DIR}/panel" "${INSTALL_DIR}/bot"
+  cat >/etc/sudoers.d/alyan-panel <<'SUDO'
+_alyanpanel ALL=(root) NOPASSWD: /usr/local/bin/alyan-ctl, /usr/local/bin/alyan-ctl *
+SUDO
+  chmod 0440 /etc/sudoers.d/alyan-panel
+}
+
+# ─── Fast Live Hot-Update Mode (`install.sh --update`) ───────────────────────
+if [[ "${1:-}" == "--update" ]]; then
+  preflight_check
+  flame_banner
+  section_hdr "UPDATE" "Applying Live Alyan Webpanel Hot-Update"
+  systemctl stop alyan-panel alyan-bot 2>/dev/null || true
+  run_task 45 "Syncing latest Engine, Guard, WSD & UI from GitHub" deploy_project_files
+  run_task 75 "Migrating service account & unlocking 'Alyan' username" ensure_panel_service_user
+  rebuild_and_restart() {
+    systemctl daemon-reload
+    /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
+    for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-qos alyan-panel; do
+      systemctl restart "$svc"
+    done
+  }
+  run_task 100 "Recompiling configs & restarting live tunneling stack" rebuild_and_restart
+  echo -e "\n  ${C_OK}✔ Live Update Complete! Refresh your Webpanel browser tab (Ctrl+F5).${C_RST}\n"
+  exit 0
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  MAIN INSTALLATION FLOW
 # ═════════════════════════════════════════════════════════════════════════════
@@ -210,49 +294,6 @@ install_daemons_pkg() {
   systemctl stop nginx haproxy dropbear 2>/dev/null || true
 }
 run_task 44 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_pkg
-
-deploy_project_files() {
-  mkdir -p "$INSTALL_DIR"/{core,cli,bot,panel/static,services/{wsd,guard,qos,systemd},templates}
-
-  # If running from curl pipe (not a local git folder), clone bundle once cleanly
-  local local_check=""
-  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    local_check="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  fi
-  if [[ -z "$local_check" || ! -f "${local_check}/core/alyan-ctl" ]]; then
-    BUNDLE_DIR="/tmp/alyan-bundle-src"
-    rm -rf "$BUNDLE_DIR"
-    if [[ -n "${ALYAN_GH_TOKEN:-}" ]]; then
-      git clone --depth 1 "https://x-access-token:${ALYAN_GH_TOKEN}@github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || \
-      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
-    else
-      git clone --depth 1 "https://github.com/${REPO_SLUG}.git" "$BUNDLE_DIR" || true
-    fi
-  fi
-
-  fetch_asset "install.sh"                       "${INSTALL_DIR}/install.sh" || true
-  fetch_asset "core/alyan-ctl"                   "${INSTALL_DIR}/core/alyan-ctl"
-  fetch_asset "services/wsd/alyan-wsd.py"        "${INSTALL_DIR}/services/wsd/alyan-wsd.py"
-  fetch_asset "services/guard/alyan-guard.py"    "${INSTALL_DIR}/services/guard/alyan-guard.py"
-  fetch_asset "services/qos/alyan-qos.sh"        "${INSTALL_DIR}/services/qos/alyan-qos.sh"
-  fetch_asset "templates/haproxy.cfg.tpl"        "${INSTALL_DIR}/templates/haproxy.cfg.tpl"
-  fetch_asset "templates/nginx-router.conf.tpl"  "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
-  fetch_asset "templates/nginx-panel.conf.tpl"   "${INSTALL_DIR}/templates/nginx-panel.conf.tpl"
-  fetch_asset "templates/xray-config.json.tpl"   "${INSTALL_DIR}/templates/xray-config.json.tpl"
-  fetch_asset "cli/menu.sh"                      "${INSTALL_DIR}/cli/menu.sh"
-  fetch_asset "panel/app.py"                     "${INSTALL_DIR}/panel/app.py"
-  fetch_asset "panel/static/index.html"          "${INSTALL_DIR}/panel/static/index.html"
-  fetch_asset "panel/static/app.css"             "${INSTALL_DIR}/panel/static/app.css"
-  fetch_asset "panel/static/app.js"              "${INSTALL_DIR}/panel/static/app.js"
-  fetch_asset "bot/alyan-bot.py"                 "${INSTALL_DIR}/bot/alyan-bot.py"
-  for unit in alyan-wsd alyan-guard alyan-qos alyan-panel alyan-bot; do
-    fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
-  done
-  rm -rf "/tmp/alyan-bundle-src"
-  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/qos/alyan-qos.sh" 2>/dev/null || true
-  ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
-  ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
-}
 run_task 54 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files
 
 install_xray_core() {
@@ -282,12 +323,7 @@ UNIT
 run_task 66 "Installing Xray-Core (VLESS · VMess · Trojan · XHTTP)" install_xray_core
 
 setup_panel_venv() {
-  id -u alyan &>/dev/null || useradd -r -s /usr/sbin/nologin -d /opt/alyan alyan
-  chown -R alyan:alyan "${INSTALL_DIR}/panel" "${INSTALL_DIR}/bot"
-  cat >/etc/sudoers.d/alyan-panel <<'SUDO'
-alyan ALL=(root) NOPASSWD: /usr/local/bin/alyan-ctl, /usr/local/bin/alyan-ctl *
-SUDO
-  chmod 0440 /etc/sudoers.d/alyan-panel
+  ensure_panel_service_user
   python3 -m venv "${INSTALL_DIR}/venv"
   "${INSTALL_DIR}/venv/bin/pip" install --upgrade --quiet pip
   "${INSTALL_DIR}/venv/bin/pip" install --quiet fastapi "uvicorn[standard]" bcrypt python-multipart httpx

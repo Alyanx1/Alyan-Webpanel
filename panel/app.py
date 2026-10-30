@@ -386,19 +386,22 @@ async def api_audit(request: Request, sess: dict = Depends(require_session)):
 
 
 # ─── Static UI Shell Routes ──────────────────────────────────────────────────
+NO_CACHE_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
+
 @app.get("/")
 async def index_page():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE_HEADERS)
 
 
 @app.get("/app.css")
 async def app_css():
-    return FileResponse(STATIC_DIR / "app.css", media_type="text/css")
+    return FileResponse(STATIC_DIR / "app.css", media_type="text/css", headers=NO_CACHE_HEADERS)
 
 
 @app.get("/app.js")
 async def app_js():
-    return FileResponse(STATIC_DIR / "app.js", media_type="application/javascript")
+    return FileResponse(STATIC_DIR / "app.js", media_type="application/javascript", headers=NO_CACHE_HEADERS)
 
 
 if STATIC_DIR.exists():
