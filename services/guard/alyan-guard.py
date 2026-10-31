@@ -92,7 +92,11 @@ SSHD_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 XRAY_EMAIL_RE = re.compile(r"email:\s*([^\s@]+)@alyan", re.IGNORECASE)
-XRAY_FROM_RAW_RE = re.compile(r"\bfrom\s+(?:tcp:|udp:)?(\S+)\s+accepted\b", re.IGNORECASE)
+XRAY_FROM_RAW_RE = re.compile(
+    r"(?:\bfrom\s+)?(?:tcp:|udp:)?(\[[0-9a-fA-F:]+\]:[0-9]+|[0-9a-fA-F\.:]+:[0-9]+|[0-9\.]+)\s+accepted\b",
+    re.IGNORECASE,
+)
+NGINX_XRAY_LOG = Path("/var/log/nginx/alyan-xray.log")
 
 
 def db_conn():
@@ -151,6 +155,46 @@ def device_key_for_ip(ip_str: str) -> str:
         return ip_str
 
 
+def read_recent_nginx_xray_ips() -> dict[str, list[str]]:
+    """
+    Returns proto -> list of recent clean unique client IPs from Nginx handshake log.
+    e.g. {"vless": ["119.73.99.12"], "vmess": [], "trojan": []}
+    """
+    res: dict[str, list[str]] = {}
+    if not NGINX_XRAY_LOG.exists():
+        return res
+    try:
+        with NGINX_XRAY_LOG.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            sz = f.tell()
+            f.seek(max(0, sz - 32768))
+            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-150:]
+        for ln in lines:
+            parts = ln.strip().split()
+            if len(parts) < 4:
+                continue
+            raw_ip = parts[1]
+            uri = parts[3].lower()
+            ip_clean = clean_public_ip(raw_ip)
+            if not ip_clean:
+                continue
+            proto = None
+            if "vless" in uri or "xhttp" in uri:
+                proto = "vless"
+            elif "vmess" in uri:
+                proto = "vmess"
+            elif "trojan" in uri:
+                proto = "trojan"
+            if proto:
+                if proto not in res:
+                    res[proto] = []
+                if ip_clean not in res[proto]:
+                    res[proto].append(ip_clean)
+    except Exception:
+        pass
+    return res
+
+
 def parse_xray_source_ip(line: str) -> tuple[str | None, bool]:
     """Return (public_ip_or_None, was_loopback) from an Xray access.log 'accepted' line."""
     m = XRAY_FROM_RAW_RE.search(line)
@@ -160,7 +204,7 @@ def parse_xray_source_ip(line: str) -> tuple[str | None, bool]:
     if tok.startswith(("127.0.0.1", "[::1]", "::1")):
         return None, True
     ip_clean = clean_public_ip(tok)
-    return ip_clean, False
+    return ip_clean, (ip_clean is None)
 
 
 def read_cpu_pct() -> int:
@@ -346,16 +390,20 @@ def refresh_auth_pid_cache(canon_users: dict[str, str]):
                 PID_AUTH_CACHE[pid] = canon_users[u_low]
 
 
-def query_haproxy_sessions() -> tuple[dict[str, str], list[str]]:
+def query_haproxy_sessions() -> tuple[dict[str, str], list[str], list[str], list[str]]:
     """
     Query HAProxy admin socket once per cycle:
       - loopback_map: 127.0.0.1:<ephemeral_port> -> real public client IP (for SSH-SSL :443 -> Dropbear)
-      - h2c_ips: active public client IPs on be_nginx_h2c (fallback for gRPC streams if XFF wasn't logged)
+      - ws_ips: active public client IPs on be_nginx_ws (WebSocket VLESS, VMess, Trojan, XHTTP)
+      - h2c_ips: active public client IPs on be_nginx_h2c (gRPC streams)
+      - trojan_ips: active public client IPs on be_xray_trojan_tcp (Trojan TCP)
     """
     loopback_map: dict[str, str] = {}
+    ws_ips: list[str] = []
     h2c_ips: list[str] = []
+    trojan_ips: list[str] = []
     if not HAPROXY_SOCK.exists():
-        return loopback_map, h2c_ips
+        return loopback_map, ws_ips, h2c_ips, trojan_ips
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(0.45)
@@ -375,15 +423,19 @@ def query_haproxy_sessions() -> tuple[dict[str, str], list[str]]:
             ip = clean_public_ip(m_src.group(1))
             if not ip:
                 continue
-            if "be=be_nginx_h2c" in block and ip not in h2c_ips:
+            if ("be=be_nginx_ws" in block or "srv=nginx_ws" in block) and ip not in ws_ips:
+                ws_ips.append(ip)
+            if ("be=be_nginx_h2c" in block or "srv=nginx_h2" in block) and ip not in h2c_ips:
                 h2c_ips.append(ip)
+            if ("be=be_xray_trojan_tcp" in block or "srv=xray_trojan" in block) and ip not in trojan_ips:
+                trojan_ips.append(ip)
             for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", block):
                 lp = m_lp.group(1)
                 if lp not in ("109", "143", "22", "2095", "4443", "8880", "8881", "10023"):
                     loopback_map[lp] = ip
     except Exception:
         pass
-    return loopback_map, h2c_ips
+    return loopback_map, ws_ips, h2c_ips, trojan_ips
 
 
 def pid_to_username(pid: int, uid_map: dict[int, str], canon_users: dict[str, str]) -> str | None:
@@ -535,18 +587,25 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
 
 def poll_xray_stats_and_ips(
     xray_users: list[sqlite3.Row],
+    ws_ips: list[str],
     h2c_ips: list[str],
+    trojan_ips: list[str],
 ) -> tuple[dict[str, int], dict[str, list[str]], dict[str, int]]:
     """
     Returns:
       - deltas: uuid -> bytes transferred since last 2s tick
       - ips_by_uuid: uuid -> sorted clean unique client IPs (1 IP per unique device)
-      - dev_count_by_uuid: uuid -> count of distinct simultaneously active devices in fresh 14s window
+      - dev_count_by_uuid: uuid -> count of distinct simultaneously active devices in fresh window
     """
     tag_to_uuid: dict[str, str] = {}
+    uuid_to_proto: dict[str, str] = {}
     for r in xray_users:
-        tag_to_uuid[f"{r['username'].lower()}.{r['proto'].lower()}"] = r["uuid"]
-        tag_to_uuid.setdefault(r["username"].lower(), r["uuid"])
+        u_low = r["username"].lower()
+        p_low = r["proto"].lower()
+        uid = r["uuid"]
+        tag_to_uuid[f"{u_low}.{p_low}"] = uid
+        tag_to_uuid.setdefault(u_low, uid)
+        uuid_to_proto[uid] = p_low
 
     deltas: dict[str, int] = {}
     if Path("/usr/local/bin/xray").exists():
@@ -569,9 +628,8 @@ def poll_xray_stats_and_ips(
             pass
 
     now_ts = time.time()
-    now_dt = dt.datetime.now()
-    seen_loopback_uids: set[str] = set()
     fresh_window_devs: dict[str, set[str]] = {}
+    nginx_proto_ips = read_recent_nginx_xray_ips()
 
     if XRAY_ACCESS_LOG.exists():
         try:
@@ -579,7 +637,7 @@ def poll_xray_stats_and_ips(
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
                 f.seek(max(0, sz - 65536))
-                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-400:]
+                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-300:]
             for ln in tail_lines:
                 if "accepted" not in ln or "email:" not in ln:
                     continue
@@ -589,29 +647,31 @@ def poll_xray_stats_and_ips(
                 uid = tag_to_uuid.get(m_em.group(1).lower())
                 if not uid:
                     continue
-                try:
-                    parsed_dt = dt.datetime.strptime(ln[:19], "%Y/%m/%d %H:%M:%S")
-                    age = (now_dt - parsed_dt).total_seconds()
-                    if age > 16.0 or age < -30.0:
-                        continue
-                    line_ts = now_ts - max(0.0, age)
-                except Exception:
-                    continue
 
+                proto = uuid_to_proto.get(uid, "vless")
                 ip_clean, was_loop = parse_xray_source_ip(ln)
-                if was_loop:
-                    seen_loopback_uids.add(uid)
-                    continue
-                if not ip_clean:
+                matched_ip = ip_clean
+
+                if was_loop or not matched_ip:
+                    # Connection proxied through Nginx/HAProxy (127.0.0.1 loopback)
+                    # Priority 1: Nginx logged real client IP for this protocol
+                    if proto in nginx_proto_ips and nginx_proto_ips[proto]:
+                        matched_ip = nginx_proto_ips[proto][-1]
+                    # Priority 2: HAProxy active backend sessions
+                    elif proto in ("vless", "vmess") and ws_ips:
+                        matched_ip = ws_ips[0]
+                    elif proto == "trojan":
+                        matched_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
+                    elif h2c_ips:
+                        matched_ip = h2c_ips[0]
+
+                if not matched_ip:
                     continue
 
-                dev_k = device_key_for_ip(ip_clean)
+                dev_k = device_key_for_ip(matched_ip)
                 dev_map = XRAY_ACTIVE_DEVICES.setdefault(uid, {})
-                prev_entry = dev_map.get(dev_k)
-                if not prev_entry or line_ts >= prev_entry["ts"]:
-                    dev_map[dev_k] = {"ip": ip_clean, "ts": line_ts}
-                if (now_ts - line_ts) <= 14.0:
-                    fresh_window_devs.setdefault(uid, set()).add(dev_k)
+                dev_map[dev_k] = {"ip": matched_ip, "ts": now_ts}
+                fresh_window_devs.setdefault(uid, set()).add(dev_k)
         except Exception:
             pass
 
@@ -620,28 +680,37 @@ def poll_xray_stats_and_ips(
 
     for r in xray_users:
         uid = r["uuid"]
+        proto = r["proto"].lower()
         dev_map = XRAY_ACTIVE_DEVICES.setdefault(uid, {})
         active_traffic = deltas.get(uid, 0) > 0
 
-        # If bytes are actively flowing on a long-lived stream without new TCP handshakes,
-        # keep ONLY the single most-recent active device alive (never resurrecting old IPs!).
-        if active_traffic and dev_map and not fresh_window_devs.get(uid):
-            newest_k = max(dev_map.keys(), key=lambda k: dev_map[k]["ts"])
-            if now_ts - dev_map[newest_k]["ts"] <= 24.0:
-                dev_map[newest_k]["ts"] = now_ts
+        # If data is actively transferring right now, keep current device alive or adopt active IP:
+        if active_traffic:
+            if dev_map:
+                for k in dev_map:
+                    dev_map[k]["ts"] = now_ts
+            else:
+                adopted_ip = None
+                if proto in nginx_proto_ips and nginx_proto_ips[proto]:
+                    adopted_ip = nginx_proto_ips[proto][-1]
+                elif proto in ("vless", "vmess") and ws_ips:
+                    adopted_ip = ws_ips[0]
+                elif proto == "trojan":
+                    adopted_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
+                elif h2c_ips:
+                    adopted_ip = h2c_ips[0]
+                elif ws_ips:
+                    adopted_ip = ws_ips[0]
 
-        # Prune any device idle > 16 seconds
-        for stale_k in [k for k, v in dev_map.items() if now_ts - v["ts"] > 16.0]:
+                if adopted_ip:
+                    dev_map[device_key_for_ip(adopted_ip)] = {"ip": adopted_ip, "ts": now_ts}
+
+        # Prune any device idle > 90 seconds (generous idle window for long-lived tunnel streams)
+        for stale_k in [k for k, v in dev_map.items() if now_ts - v["ts"] > 90.0]:
             dev_map.pop(stale_k, None)
 
-        # gRPC loopback fallback ONLY from verified HAProxy h2c backend (never random :80/:443 sockets)
-        if not dev_map and uid in seen_loopback_uids and h2c_ips:
-            first_h2 = h2c_ips[0]
-            dev_map[device_key_for_ip(first_h2)] = {"ip": first_h2, "ts": now_ts}
-
         ips_by_uuid[uid] = sorted({v["ip"] for v in dev_map.values()})
-        # For strict IP-limit violation checks, count distinct fresh devices in the 14s window
-        dev_count_by_uuid[uid] = len(fresh_window_devs.get(uid, set()))
+        dev_count_by_uuid[uid] = len(fresh_window_devs.get(uid, set())) or (len(ips_by_uuid[uid]) if active_traffic else 0)
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 
@@ -673,7 +742,7 @@ def enforce_cycle():
         return
 
     CYCLE_TICK += 1
-    hap_loop_ips, h2c_ips = query_haproxy_sessions()
+    hap_loop_ips, ws_ips, h2c_ips, trojan_ips = query_haproxy_sessions()
 
     conn = db_conn()
     try:
@@ -687,7 +756,7 @@ def enforce_cycle():
         today = dt.date.today().isoformat()
         managed_ssh = {r["username"] for r in ssh_rows}
         ssh_sessions, ssh_deltas = scan_ssh_sessions(managed_ssh, hap_loop_ips)
-        xray_deltas, xray_ips, xray_fresh_devs = poll_xray_stats_and_ips(xray_rows, h2c_ips)
+        xray_deltas, xray_ips, xray_fresh_devs = poll_xray_stats_and_ips(xray_rows, ws_ips, h2c_ips, trojan_ips)
 
         # ─── 1. Enforce SSH Quotas, Expiry & Strict IP Limit Auto-Disable ───
         for r in ssh_rows:
@@ -819,7 +888,8 @@ def enforce_cycle():
     for r in xray_rows:
         uid = r["uuid"]
         ips = xray_ips.get(uid, [])
-        xray_live[uid] = {"online": len(ips), "ips": ips}
+        is_online = len(ips) if ips else (1 if int(xray_deltas.get(uid, 0)) > 0 else 0)
+        xray_live[uid] = {"online": is_online, "ips": ips}
 
     snapshot = {
         "updated_at": int(time.time()),

@@ -55,10 +55,14 @@ map "$alyan_is_trusted_cdn:$alyan_cdn_client_ip" $alyan_real_ip {
     default     $proxy_protocol_addr;
 }
 
+log_format alyan_xray '$time_iso8601 $alyan_real_ip $status $request_uri';
+
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {
     listen 127.0.0.1:8880 proxy_protocol backlog=16384;
     server_name {{DOMAIN}} _;
+
+    access_log /var/log/nginx/alyan-xray.log alyan_xray;
 
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
@@ -146,6 +150,8 @@ server {
 server {
     listen 127.0.0.1:8881 http2 proxy_protocol backlog=16384;
     server_name {{DOMAIN}} _;
+
+    access_log /var/log/nginx/alyan-xray.log alyan_xray;
 
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;

@@ -16,6 +16,22 @@ bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/i
 
 ---
 
+## 🛠️ Standalone Xray Live Online & Real-IP Hot-Fix (Reversible)
+
+If you only want to update the **Xray (VLESS / VMess / Trojan) Real-IP and Live Online status engine** without reinstalling or replacing the full stack, run this dedicated patch. It automatically creates a pre-fix safety backup:
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/update-xray-fix.sh | tr -d '\r')
+```
+
+> **Instant Rollback Command:** If you ever want to revert this patch and restore your panel exactly as it was:
+> ```bash
+> bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/update-xray-fix.sh | tr -d '\r') --rollback
+> ```
+> *(Or on your VPS terminal: `bash /opt/alyan/rollback-xray-fix.sh`)*
+
+---
+
 ## 🚀 Fresh Installation (Ubuntu 22.04 / 24.04+)
 
 ### Option A — One-Line GitHub Install
