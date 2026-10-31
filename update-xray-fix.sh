@@ -123,25 +123,26 @@ p = '/usr/sbin/dropbear'
 try:
     with open(p, 'rb') as f:
         data = f.read()
-    m = re.search(rb'SSH-2.0-dropbear_[^\r\n\x00]+', data)
-    if m:
+    new_b = b'SSH-2.0-ALYAN_Server'
+    def repl(m):
         old_b = m.group(0)
-        new_b = b'SSH-2.0-ALYAN_Server'
-        if len(new_b) <= len(old_b):
-            replacement = new_b + b'\x00' * (len(old_b) - len(new_b))
-            patched = data[:m.start()] + replacement + data[m.end():]
-            with open('/tmp/dropbear.tmp', 'wb') as f_out:
-                f_out.write(patched)
-            shutil.move('/tmp/dropbear.tmp', p)
-            os.chmod(p, 0o755)
+        return new_b + b'\x00' * (len(old_b) - len(new_b)) if len(new_b) <= len(old_b) else old_b
+    patched, count = re.subn(rb'SSH-2.0-dropbear_[^\r\n\x00]+', repl, data)
+    if count > 0:
+        with open('/tmp/dropbear.tmp', 'wb') as f_out:
+            f_out.write(patched)
+        shutil.move('/tmp/dropbear.tmp', p)
+        os.chmod(p, 0o755)
 except Exception:
     pass
 " 2>/dev/null || true
 
-  # Test if patched dropbear binary executes normally
-  if ! /usr/sbin/dropbear -h >/dev/null 2>&1; then
-    # Fallback to pristine binary if patch causes execution issue
+  # Verify patched dropbear binary executes normally (dropbear -h outputs 'Dropbear')
+  if ! /usr/sbin/dropbear -h 2>&1 | grep -iq "dropbear"; then
+    echo -e "  ${C_ERR}⚠ Dropbear binary check failed; reverting to pristine package...${C_RST}"
     apt-get install --reinstall -y dropbear >/dev/null 2>&1 || true
+  else
+    echo -e "  ${C_OK}✔ Dropbear branded with SSH-2.0-ALYAN_Server successfully.${C_RST}"
   fi
 fi
 

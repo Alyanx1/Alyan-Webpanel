@@ -307,6 +307,28 @@ section_hdr "3/5" "Forging Tunneling Stack (Nginx · HAProxy · Dropbear · Xray
 install_daemons_pkg() {
   apt-get install -y --no-install-recommends dropbear nginx haproxy
   systemctl stop nginx haproxy dropbear 2>/dev/null || true
+  # Apply ALYAN_Server Dropbear banner patch
+  if [[ -f /usr/sbin/dropbear ]]; then
+    python3 -c "
+import re, shutil, os
+p = '/usr/sbin/dropbear'
+try:
+    with open(p, 'rb') as f:
+        data = f.read()
+    new_b = b'SSH-2.0-ALYAN_Server'
+    def repl(m):
+        old_b = m.group(0)
+        return new_b + b'\x00' * (len(old_b) - len(new_b)) if len(new_b) <= len(old_b) else old_b
+    patched, count = re.subn(rb'SSH-2.0-dropbear_[^\r\n\x00]+', repl, data)
+    if count > 0:
+        with open('/tmp/dropbear.tmp', 'wb') as f_out:
+            f_out.write(patched)
+        shutil.move('/tmp/dropbear.tmp', p)
+        os.chmod(p, 0o755)
+except Exception:
+    pass
+" 2>/dev/null || true
+  fi
 }
 run_task 44 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_pkg
 run_task 54 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files

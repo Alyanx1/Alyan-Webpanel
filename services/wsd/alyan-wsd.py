@@ -7,6 +7,8 @@ bridges to Dropbear (127.0.0.1:109) with TCP_NODELAY & 64KB zero-stall buffers,
 and exports real client IP + byte stats to /run/alyan-wsd-sessions.json.
 """
 import asyncio
+import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -22,12 +24,33 @@ TARGET_PORT = int(os.environ.get("ALYAN_SSH_TARGET_PORT", "109"))
 STATE_FILE = Path("/run/alyan-wsd-sessions.json")
 
 PROXY_V2_SIG = b"\r\n\r\n\x00\r\nQUIT\n"
-HTTP_101_RESPONSE = (
-    b"HTTP/1.1 101 Switching Protocols\r\n"
-    b"Upgrade: websocket\r\n"
-    b"Connection: Upgrade\r\n"
-    b"Server: Alyan-Flame-Edge\r\n\r\n"
-)
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+def build_101_response(payload: bytes) -> bytes:
+    sec_key = None
+    if b"\r\n" in payload:
+        header_text = payload.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
+        for line in header_text.splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                if k.strip().lower() == "sec-websocket-key":
+                    sec_key = v.strip()
+                    break
+
+    resp_lines = [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+    ]
+    if sec_key:
+        sha = hashlib.sha1((sec_key + WS_GUID).encode("utf-8")).digest()
+        accept_b64 = base64.b64encode(sha).decode("utf-8")
+        resp_lines.append(f"Sec-WebSocket-Accept: {accept_b64}")
+    else:
+        resp_lines.append("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+    resp_lines.append("Server: Alyan-Flame-Edge")
+    return ("\r\n".join(resp_lines) + "\r\n\r\n").encode("latin1")
 
 CF_NETWORKS = [
     ipaddress.ip_network(cidr)
@@ -171,7 +194,7 @@ def strip_ws_headers(data: bytes) -> tuple[bool, bytes]:
     ssh_idx = data.find(b"SSH-")
     if ssh_idx != -1:
         return True, data[ssh_idx:]
-    end_idx = data.rfind(b"\r\n\r\n")
+    end_idx = data.find(b"\r\n\r\n")
     if end_idx != -1:
         return True, data[end_idx + 4:]
     return True, b""
@@ -229,6 +252,16 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
                 c_writer.close()
                 return
 
+        if not payload.startswith(b"SSH-") and b"\r\n\r\n" not in payload:
+            while b"\r\n\r\n" not in payload and len(payload) < 8192:
+                try:
+                    more = await asyncio.wait_for(c_reader.read(4096), timeout=3.0)
+                    if not more:
+                        break
+                    payload += more
+                except asyncio.TimeoutError:
+                    break
+
         # Unwrap CDN client IP headers ONLY if TCP connection came from Cloudflare / loopback
         if is_trusted_cdn(real_ip) and b"\r\n" in payload and not payload.startswith(b"SSH-"):
             hdr_text = payload.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
@@ -249,7 +282,8 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
 
         needs_101, tail = strip_ws_headers(payload)
         if needs_101:
-            c_writer.write(HTTP_101_RESPONSE)
+            resp_101 = build_101_response(payload)
+            c_writer.write(resp_101)
             await c_writer.drain()
 
         s_reader, s_writer = await asyncio.wait_for(
