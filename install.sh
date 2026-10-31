@@ -216,7 +216,31 @@ if [[ "${1:-}" == "--update" ]]; then
   systemctl disable alyan-qos 2>/dev/null || true
   rm -f /etc/systemd/system/alyan-qos.service /etc/alyan/qos.json /etc/sysctl.d/99-alyan-bbr.conf
   run_task 45 "Syncing latest Engine, Guard, WSD & UI from GitHub" deploy_project_files
-  run_task 75 "Verifying service account & permissions" ensure_panel_service_user
+  run_task 65 "Verifying service account & permissions" ensure_panel_service_user
+  patch_dropbear_branding() {
+    if [[ -f /usr/sbin/dropbear ]]; then
+      python3 -c "
+import re, shutil, os
+p = '/usr/sbin/dropbear'
+try:
+    with open(p, 'rb') as f:
+        data = f.read()
+    new_b = b'SSH-2.0-ALYAN_Server'
+    def repl(m):
+        old_b = m.group(0)
+        return new_b + b'\x00' * (len(old_b) - len(new_b)) if len(new_b) <= len(old_b) else old_b
+    patched, count = re.subn(rb'SSH-2.0-dropbear_[^\r\n\x00]+', repl, data)
+    if count > 0:
+        with open('/tmp/dropbear.tmp', 'wb') as f_out:
+            f_out.write(patched)
+        shutil.move('/tmp/dropbear.tmp', p)
+        os.chmod(p, 0o755)
+except Exception:
+    pass
+" 2>/dev/null || true
+    fi
+  }
+  run_task 80 "Ensuring Dropbear SSH-2.0-ALYAN_Server branding" patch_dropbear_branding
   rebuild_and_restart() {
     : > /var/log/xray/access.log 2>/dev/null || true
     rm -f /run/alyan-live.json /run/alyan-ssl-cache.json
@@ -432,7 +456,7 @@ printf "${C_RED}┃${C_RST}  ${C_GRY}Web Panel URL  :${C_RST} ${C_GLD}${C_BOLD}h
 printf "${C_RED}┃${C_RST}  ${C_GRY}Admin Username :${C_RST} ${C_WHT}${C_BOLD}admin${C_RST}\n"
 printf "${C_RED}┃${C_RST}  ${C_GRY}Admin Password :${C_RST} ${C_ORG}${C_BOLD}%s${C_RST}\n" "$ADMIN_PASS"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}SSH Direct     :${C_RST} ${C_WHT}22, 109, 143${C_RST}   ${C_GRY}│  SSH WS / SSL :${C_RST} ${C_WHT}80, 443 (/alyan)${C_RST}"
-echo -e "${C_RED}┃${C_RST}  ${C_GRY}WS Payload     :${C_RST} ${C_AMB}GET /alyan HTTP/1.1[crlf]Host: ${CUSTOM_DOMAIN}[crlf]...${C_RST}"
+echo -e "${C_RED}┃${C_RST}  ${C_GRY}WS Payload     :${C_RST} ${C_AMB}GET /alyan HTTP/1.1[crlf]Host: ${CUSTOM_DOMAIN}[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${C_RST}"
 echo -e "${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}"
 if (( ALL_HEALTHY == 0 )); then
   echo -e "${C_AMB}⚠ Note: One or more checks reported a warning. Run 'menu' → Option 6 to inspect/fix.${C_RST}"
