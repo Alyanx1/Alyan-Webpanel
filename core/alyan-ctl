@@ -132,6 +132,8 @@ def get_db() -> sqlite3.Connection:
         );
         """
     )
+    conn.execute("UPDATE admins SET scope = 'all' WHERE role = 'viewer';")
+    conn.commit()
     return conn
 
 
@@ -600,7 +602,7 @@ def check_write_permission(conn: sqlite3.Connection, actor_info: dict, creating:
 
 
 def can_access_owner(actor_info: dict, record_owner: str) -> bool:
-    if actor_info.get("role") == "super" or actor_info.get("scope") == "all":
+    if actor_info.get("role") in ("super", "viewer") or actor_info.get("scope") == "all":
         return True
     return record_owner == actor_info.get("username")
 
@@ -1538,7 +1540,9 @@ def admin_add(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip: str
     role = str(payload.get("role") or "admin").lower()
     if role not in ("super", "admin", "viewer"):
         raise ValueError("Invalid role")
-    scope = str(payload.get("scope") or ("all" if role == "super" else "own")).lower()
+    scope = str(payload.get("scope") or ("all" if role in ("super", "viewer") else "own")).lower()
+    if role == "viewer":
+        scope = "all"
     if scope not in ("own", "all"):
         scope = "own"
     max_acc = 0 if role == "super" else max(0, int(float(payload.get("max_accounts") or 0)))
@@ -1572,7 +1576,7 @@ def admin_del(conn: sqlite3.Connection, actor_info: dict, target_user: str, ip: 
 
 
 def audit_list(conn: sqlite3.Connection, actor_info: dict, limit: int = 120) -> dict:
-    if actor_info.get("role") == "super" or actor_info.get("scope") == "all":
+    if actor_info.get("role") in ("super", "viewer") or actor_info.get("scope") == "all":
         rows = conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     else:
         rows = conn.execute(

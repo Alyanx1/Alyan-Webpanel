@@ -1721,6 +1721,15 @@
         </div>
       </form>`);
     $('#admCancel').onclick = closeSheet;
+    const roleSel = $('select[name="role"]', $('#admForm'));
+    const scopeSel = $('select[name="scope"]', $('#admForm'));
+    if (roleSel && scopeSel) {
+      roleSel.onchange = () => {
+        if (roleSel.value === 'viewer' || roleSel.value === 'super') {
+          scopeSel.value = 'all';
+        }
+      };
+    }
     $('#admForm').onsubmit = async (e) => {
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
