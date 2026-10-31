@@ -75,7 +75,15 @@ def normalize_ip(raw: str) -> str | None:
 def is_trusted_cdn(ip_str: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip_str)
-        return any(addr in net for net in CF_NETWORKS)
+        if addr.is_loopback:
+            return True
+        if any(addr in net for net in CF_NETWORKS):
+            return True
+        if isinstance(addr, ipaddress.IPv4Address):
+            s = str(addr)
+            if s.startswith(("143.204.", "52.84.", "54.192.", "54.230.", "54.239.", "54.240.", "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.", "13.227.", "13.249.", "18.64.", "18.65.", "18.66.", "18.67.", "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.", "64.252.", "65.8.", "65.9.", "70.132.", "99.84.", "99.86.", "108.138.", "108.156.", "108.157.", "108.158.", "108.159.", "204.246.", "205.251.")):
+                return True
+        return False
     except ValueError:
         return False
 
@@ -171,22 +179,27 @@ def strip_ws_headers(data: bytes) -> tuple[bool, bytes]:
 
 async def pipe_server_to_client(s_reader: asyncio.StreamReader, c_writer: asyncio.StreamWriter, stat_dict: dict):
     first_chunk = True
+    banner_buf = bytearray()
     try:
         while True:
             chunk = await s_reader.read(65536)
             if not chunk:
                 break
             if first_chunk:
+                banner_buf.extend(chunk)
+                if b"\n" not in banner_buf and len(banner_buf) < 256:
+                    continue
                 first_chunk = False
-                if chunk.startswith(b"SSH-2.0-"):
-                    # Custom brand banner requested by user
-                    nl_pos = chunk.find(b"\r\n")
+                full_initial = bytes(banner_buf)
+                if full_initial.startswith(b"SSH-2.0-"):
+                    nl_pos = full_initial.find(b"\r\n")
                     if nl_pos != -1:
-                        chunk = b"SSH-2.0-ALYAN_Server\r\n" + chunk[nl_pos + 2:]
+                        chunk = b"SSH-2.0-ALYAN_Server\r\n" + full_initial[nl_pos + 2:]
                     else:
-                        nl_pos = chunk.find(b"\n")
-                        if nl_pos != -1:
-                            chunk = b"SSH-2.0-ALYAN_Server\n" + chunk[nl_pos + 1:]
+                        nl_pos = full_initial.find(b"\n")
+                        chunk = b"SSH-2.0-ALYAN_Server\n" + full_initial[nl_pos + 1:]
+                else:
+                    chunk = full_initial
             stat_dict["tx"] += len(chunk)
             c_writer.write(chunk)
             await c_writer.drain()

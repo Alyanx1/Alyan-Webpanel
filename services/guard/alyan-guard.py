@@ -160,24 +160,32 @@ def device_key_for_ip(ip_str: str) -> str:
         return ip_str
 
 
-def read_recent_nginx_xray_ips() -> dict[str, list[str]]:
+def read_recent_nginx_xray_ips(max_age_sec: float = 6.0) -> dict[str, list[str]]:
     """
     Returns proto -> list of recent clean unique client IPs from Nginx handshake log.
-    e.g. {"vless": ["119.73.99.12"], "vmess": [], "trojan": []}
+    Only includes handshakes within the last `max_age_sec` seconds!
     """
     res: dict[str, list[str]] = {}
     if not NGINX_XRAY_LOG.exists():
         return res
+    now_ts = time.time()
     try:
         with NGINX_XRAY_LOG.open("rb") as f:
             f.seek(0, os.SEEK_END)
             sz = f.tell()
             f.seek(max(0, sz - 32768))
-            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-150:]
+            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-100:]
         for ln in lines:
             parts = ln.strip().split()
             if len(parts) < 4:
                 continue
+            # parts[0] is $msec (Unix timestamp with float, e.g. 1730378901.123)
+            try:
+                log_ts = float(parts[0])
+                if (now_ts - log_ts) > max_age_sec:
+                    continue
+            except ValueError:
+                pass
             raw_ip = parts[1]
             uri = parts[3].lower()
             ip_clean = clean_public_ip(raw_ip)
@@ -595,6 +603,7 @@ PROTO_PORTS = {
     "vmess": (10002, 10012),
     "trojan": (10003, 10013, 10023),
 }
+XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
 
 
 def scan_active_proto_sockets() -> dict[str, int]:
@@ -664,7 +673,7 @@ def poll_xray_stats_and_ips(
 
     now_ts = time.time()
     proto_socket_counts = scan_active_proto_sockets()
-    nginx_proto_ips = read_recent_nginx_xray_ips()
+    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=6.0)
     latest_ip_from_log: dict[str, str] = {}
 
     if XRAY_ACCESS_LOG.exists():
@@ -673,7 +682,7 @@ def poll_xray_stats_and_ips(
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
                 f.seek(max(0, sz - 32768))
-                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-150:]
+                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-100:]
             for ln in tail_lines:
                 if "accepted" not in ln or "email:" not in ln:
                     continue
@@ -690,10 +699,8 @@ def poll_xray_stats_and_ips(
 
                 if was_loop or not matched_ip:
                     # Connection proxied through Nginx/HAProxy (127.0.0.1 loopback)
-                    # Priority 1: Nginx logged real client IP for this protocol (unwrapped from CloudFront / Cloudflare)
                     if proto in nginx_proto_ips and nginx_proto_ips[proto]:
                         matched_ip = nginx_proto_ips[proto][-1]
-                    # Priority 2: HAProxy active backend sessions
                     elif proto in ("vless", "vmess") and ws_ips:
                         matched_ip = ws_ips[0]
                     elif proto == "trojan":
@@ -713,18 +720,24 @@ def poll_xray_stats_and_ips(
         uid = r["uuid"]
         proto = r["proto"].lower()
         dev_map = XRAY_ACTIVE_DEVICES.setdefault(uid, {})
-        active_traffic = deltas.get(uid, 0) > 0
+        user_traffic = deltas.get(uid, 0)
+        active_traffic = user_traffic > 0
         active_sockets = proto_socket_counts.get(proto, 0)
 
+        if active_traffic:
+            XRAY_LAST_ACTIVE_TS[uid] = now_ts
+
+        idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
+
         # ── REAL-TIME DISCONNECT (within 2 seconds) ──
-        # If there are NO active sockets for this protocol and NO bytes flowing:
-        if not active_traffic and active_sockets == 0:
+        # Disconnect triggers immediately if no active sockets exist OR if no traffic for > 3.0 seconds
+        if active_sockets == 0 or (not active_traffic and idle_sec > 3.0):
             dev_map.clear()
             ips_by_uuid[uid] = []
             dev_count_by_uuid[uid] = 0
             continue
 
-        # If data is actively transferring OR active TCP sockets exist:
+        # If data is actively transferring OR user is within 3.0s active window:
         best_ip = None
         if uid in latest_ip_from_log:
             best_ip = latest_ip_from_log[uid]
@@ -740,24 +753,19 @@ def poll_xray_stats_and_ips(
         if best_ip:
             dev_k = device_key_for_ip(best_ip)
             dev_map[dev_k] = {"ip": best_ip, "ts": now_ts}
-            # Strictly limit number of recorded devices to active sockets count (prevents 2-3 old IPs showing up!)
+            # Strictly limit number of recorded devices to active sockets count (1 user = 1 IP)
             max_devs = max(1, active_sockets)
             if len(dev_map) > max_devs:
                 sorted_keys = sorted(dev_map.keys(), key=lambda k: dev_map[k]["ts"], reverse=True)
                 for k in sorted_keys[max_devs:]:
                     dev_map.pop(k, None)
-        elif dev_map:
-            for k in dev_map:
-                dev_map[k]["ts"] = now_ts
 
-        # Short timeout (4s) for any lingering device
-        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 4.0]:
+        # Short timeout (3.5s) for any lingering device
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 3.5]:
             dev_map.pop(stale_k, None)
 
         ips_by_uuid[uid] = sorted({v["ip"] for v in dev_map.values()})
         dev_count_by_uuid[uid] = len(ips_by_uuid[uid])
-
-    return deltas, ips_by_uuid, dev_count_by_uuid
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 

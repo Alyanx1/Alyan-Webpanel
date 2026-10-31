@@ -38,14 +38,14 @@ frontend fe_http_80
 
     acl is_raw_ssh    payload(0,4) -m bin 5353482d
     acl is_acme       payload(0,256) -m sub /.well-known/acme-challenge/
-    acl is_tunnel_ws  payload(0,256) -m sub -i /alyan /Alyan
+    acl is_xray_ws    payload(0,256) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
     acl is_http_80    payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
-    tcp-request content accept if is_raw_ssh or is_acme or is_tunnel_ws or is_http_80
+    tcp-request content accept if is_raw_ssh or is_acme or is_xray_ws or is_http_80
     tcp-request content accept
 
     use_backend be_dropbear  if is_raw_ssh
-    use_backend be_nginx_ws  if is_acme or is_tunnel_ws
+    use_backend be_nginx_ws  if is_acme or is_xray_ws
     default_backend be_alyan_wsd
 
 # ─── PUBLIC PORT 443 EDGE: Raw SSH vs TLS Multiplexer ────────────────────────
@@ -75,15 +75,15 @@ frontend fe_tls_terminator
 
     acl is_alpn_h2    ssl_fc_alpn -i h2
     acl is_ssh_ssl    payload(0,4) -m bin 5353482d
-    acl is_tunnel_ws  payload(0,256) -m sub -i /alyan /Alyan
+    acl is_xray_ws    payload(0,256) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
     acl is_http_req   payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
-    tcp-request content accept if is_alpn_h2 or is_ssh_ssl or is_tunnel_ws or is_http_req
+    tcp-request content accept if is_alpn_h2 or is_ssh_ssl or is_xray_ws or is_http_req
     tcp-request content accept
 
     use_backend be_nginx_h2c       if is_alpn_h2
     use_backend be_dropbear        if is_ssh_ssl
-    use_backend be_nginx_ws        if is_tunnel_ws
+    use_backend be_nginx_ws        if is_xray_ws
     use_backend be_alyan_wsd       if is_http_req
     default_backend be_xray_trojan_tcp
 

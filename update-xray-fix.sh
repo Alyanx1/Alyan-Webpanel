@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — Standalone Xray Live Online & Real-IP Hot-Fix
-#  Purpose : 1. Real-time Xray & VLESS 1-IP tracking (exact device count)
-#            2. Instant disconnect detection (<2 seconds offline)
-#            3. AWS CloudFront CDN real IP unwrapping (collapses 8-11 IPs to 1)
-#            4. HAProxy + Nginx WebSocket route for /alyan & /Alyan (fixes SSH 403)
-#            5. Dropbear SSH banner brand: SSH-2.0-ALYAN_Server
-#            6. Full instant 1-click rollback support (--rollback)
+#  🔥 ALYAN WEBPANEL — Standalone Xray Live Online, SSH & Real-IP Hot-Fix
+#  Purpose : 1. Fix SSH (Dropbear & WebSocket /alyan direct + CloudFront CDN)
+#            2. Instant VLESS disconnect detection (switches to offline in 2s)
+#            3. Single exact client IP per user (prevents 2-3 IPs)
+#            4. Real-time Dropbear SSH banner brand: SSH-2.0-ALYAN_Server
+#            5. Full instant 1-click rollback support (--rollback)
 #
 #  Apply   : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/update-xray-fix.sh | tr -d '\r')
 #  Rollback: bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/update-xray-fix.sh | tr -d '\r') --rollback
@@ -30,7 +29,7 @@ REPO_RAW_URL="https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main"
 
 banner() {
   echo -e "\n${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
-  echo -e "${C_RED}┃${C_RST}  🔥 ${C_AMB}${C_BOLD}ALYAN WEBPANEL — VLESS, CLOUDFRONT & SSH HOT-FIX${C_RST}                 ${C_RED}┃${C_RST}"
+  echo -e "${C_RED}┃${C_RST}  🔥 ${C_AMB}${C_BOLD}ALYAN WEBPANEL — SSH, VLESS REAL-TIME & BRAND HOT-FIX${C_RST}          ${C_RED}┃${C_RST}"
   echo -e "${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}\n"
 }
 
@@ -67,11 +66,9 @@ if [[ "${1:-}" == "--rollback" || "${1:-}" == "revert" || "${1:-}" == "rollback"
     cp -f "${BACKUP_DIR}/alyan-router.conf" "/etc/nginx/conf.d/alyan-router.conf"
     echo -e "  ${C_OK}✔ Restored:${C_RST} /etc/nginx/conf.d/alyan-router.conf"
   fi
-  if [[ -f "${BACKUP_DIR}/dropbear.bin" ]]; then
-    cp -f "${BACKUP_DIR}/dropbear.bin" "/usr/sbin/dropbear"
-    chmod +x /usr/sbin/dropbear
-    echo -e "  ${C_OK}✔ Restored:${C_RST} /usr/sbin/dropbear binary"
-  fi
+
+  # Ensure Dropbear package binary is healthy
+  apt-get install --reinstall -y dropbear >/dev/null 2>&1 || true
 
   # Re-render and restart all services
   if [[ -x "/usr/local/bin/alyan-ctl" ]]; then
@@ -91,10 +88,11 @@ fi
 # ─── APPLY FIX MODE ───────────────────────────────────────────────────────────
 banner
 echo -e "  ${C_WHT}This hot-fix resolves:${C_RST}"
-echo -e "    ${C_GLD}1.${C_RST} VLESS 1-IP tracking & real-time disconnect within 2 seconds"
-echo -e "    ${C_GLD}2.${C_RST} AWS CloudFront real subscriber IP unwrapping (stops 8-11 IP spikes)"
-echo -e "    ${C_GLD}3.${C_RST} CloudFront SSH 403 Forbidden bridge (/alyan & /Alyan)"
-echo -e "    ${C_GLD}4.${C_RST} Dropbear SSH banner brand: ${C_AMB}SSH-2.0-ALYAN_Server${C_RST}\n"
+echo -e "    ${C_GLD}1.${C_RST} SSH & Dropbear connection restored (Direct 109/143 + WebSocket /alyan)"
+echo -e "    ${C_GLD}2.${C_RST} VLESS real-time disconnect within 2 seconds (immediate offline)"
+echo -e "    ${C_GLD}3.${C_RST} Single exact 1-IP tracking for VLESS users"
+echo -e "    ${C_GLD}4.${C_RST} CloudFront CDN real IP unwrapping"
+echo -e "    ${C_GLD}5.${C_RST} Dropbear SSH banner brand: ${C_AMB}SSH-2.0-ALYAN_Server${C_RST}\n"
 
 # Step 1: Create Complete Safety Backup
 echo -e "  ${C_AMB}[1/4] Creating safety backup in ${BACKUP_DIR}...${C_RST}"
@@ -109,14 +107,15 @@ for f in "${INSTALL_DIR}/services/guard/alyan-guard.py" \
     cp -f "$f" "${BACKUP_DIR}/$(basename "$f")"
   fi
 done
-if [[ -f /usr/sbin/dropbear ]]; then
-  cp -f /usr/sbin/dropbear "${BACKUP_DIR}/dropbear.bin"
-fi
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "${BACKUP_DIR}/backup_timestamp.txt"
 echo -e "  ${C_OK}✔ Backup saved.${C_RST}"
 
-# Step 2: Fetch and Install Updated Files
-echo -e "  ${C_AMB}[2/4] Deploying updated Guard, WSD, Nginx & HAProxy router configs...${C_RST}"
+# Step 2: Ensure Clean Dropbear Binary
+echo -e "  ${C_AMB}[2/4] Verifying clean Dropbear package binary...${C_RST}"
+apt-get install --reinstall -y dropbear >/dev/null 2>&1 || true
+
+# Step 3: Fetch and Deploy Updated Files
+echo -e "  ${C_AMB}[3/4] Deploying updated Guard, WSD & Router configs...${C_RST}"
 mkdir -p "${INSTALL_DIR}/services/guard" "${INSTALL_DIR}/services/wsd" "${INSTALL_DIR}/templates" /var/log/nginx
 
 # Fetch latest engine files
@@ -134,40 +133,17 @@ sed -i 's/\r$//' "${INSTALL_DIR}/templates/haproxy.cfg.tpl"
 curl -fsSL "${REPO_RAW_URL}/templates/nginx-router.conf.tpl?ts=$(date +%s)" -o "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
 sed -i 's/\r$//' "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
 
-# Step 2b: Apply Dropbear SSH Banner Patch to /usr/sbin/dropbear
-if [[ -f /usr/sbin/dropbear ]]; then
-  python3 -c "
-import re
-p = '/usr/sbin/dropbear'
-try:
-    with open(p, 'rb') as f:
-        data = f.read()
-    m = re.search(rb'SSH-2.0-dropbear_[^\r\n\x00]+', data)
-    if m:
-        old_b = m.group(0)
-        new_b = b'SSH-2.0-ALYAN_Server'
-        if len(new_b) <= len(old_b):
-            replacement = new_b + b'\x00' * (len(old_b) - len(new_b))
-            patched = data[:m.start()] + replacement + data[m.end():]
-            with open(p, 'wb') as f:
-                f.write(patched)
-except Exception:
-    pass
-" 2>/dev/null || true
-fi
-
-# Ensure nginx xray log exists with write permissions
+# Ensure log file exists with write permissions
 touch /var/log/nginx/alyan-xray.log
 chmod 0666 /var/log/nginx/alyan-xray.log 2>/dev/null || true
 
-# Re-render HAProxy and Nginx router configs with the new templates
+# Re-render configurations through alyan-ctl
 if [[ -x "/usr/local/bin/alyan-ctl" ]]; then
   /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null 2>&1 || true
 fi
-echo -e "  ${C_OK}✔ Engine files & templates updated.${C_RST}"
 
-# Step 3: Verify and Restart Services
-echo -e "  ${C_AMB}[3/4] Testing configuration and restarting services...${C_RST}"
+# Step 4: Verify and Restart Services
+echo -e "  ${C_AMB}[4/4] Testing configuration and restarting services...${C_RST}"
 if command -v python3 &>/dev/null; then
   python3 -m py_compile "${INSTALL_DIR}/services/guard/alyan-guard.py" "${INSTALL_DIR}/services/wsd/alyan-wsd.py"
 fi
@@ -179,7 +155,7 @@ for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
   systemctl restart "$svc" 2>/dev/null || true
 done
 
-# Verify health
+# Verify service health
 HEALTH_OK=1
 for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
   if systemctl is-active --quiet "$svc"; then
@@ -190,7 +166,7 @@ for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
   fi
 done
 
-# Step 4: Write Local Rollback Helper Script
+# Step 5: Write Local Rollback Helper Script
 cat > "${INSTALL_DIR}/rollback-xray-fix.sh" << 'ROLSCRIPT'
 #!/usr/bin/env bash
 exec bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/update-xray-fix.sh | tr -d '\r') --rollback
@@ -199,13 +175,13 @@ chmod +x "${INSTALL_DIR}/rollback-xray-fix.sh"
 
 echo -e "\n${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
 if (( HEALTH_OK == 1 )); then
-  echo -e "${C_RED}┃${C_RST}  ${C_OK}✔ ALYAN WEBPANEL FIX APPLIED SUCCESSFULLY!${C_RST}                         ${C_RED}┃${C_RST}"
+  echo -e "${C_RED}┃${C_RST}  ${C_OK}✔ SSH & VLESS REAL-TIME FIX APPLIED SUCCESSFULLY!${C_RST}                  ${C_RED}┃${C_RST}"
 else
   echo -e "${C_RED}┃${C_RST}  ${C_AMB}⚠ Fix applied with warnings. Check service logs.${C_RST}                    ${C_RED}┃${C_RST}"
 fi
 echo -e "${C_RED}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫${C_RST}"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}Webpanel Tab   :${C_RST} ${C_GLD}Refresh your browser (Ctrl + F5)${C_RST}                    ${C_RED}┃${C_RST}"
-echo -e "${C_RED}┃${C_RST}  ${C_GRY}Dropbear Banner:${C_RST} ${C_WHT}SSH-2.0-ALYAN_Server${C_RST}                                 ${C_RED}┃${C_RST}"
+echo -e "${C_RED}┃${C_RST}  ${C_GRY}SSH Banner     :${C_RST} ${C_WHT}SSH-2.0-ALYAN_Server${C_RST}                                 ${C_RED}┃${C_RST}"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}To Revert Fix  :${C_RST} ${C_WHT}bash /opt/alyan/rollback-xray-fix.sh${C_RST}                 ${C_RED}┃${C_RST}"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}Or via Remote  :${C_RST} ${C_AMB}bash <(curl -sSL .../update-xray-fix.sh) --rollback${C_RST}    ${C_RED}┃${C_RST}"
 echo -e "${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}\n"

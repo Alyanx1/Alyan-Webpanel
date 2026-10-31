@@ -62,23 +62,6 @@ server {
         default_type "text/plain";
     }
 
-    # SSH WebSocket Bridge (/alyan or /Alyan) via CDN or Direct
-    location ~* ^/(alyan|Alyan)$ {
-        proxy_redirect off;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:2095;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $alyan_connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $alyan_real_ip;
-        proxy_set_header X-Forwarded-For $alyan_real_ip;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-
     location /alyan-vless {
         proxy_redirect off;
         proxy_buffering off;
@@ -165,23 +148,6 @@ server {
     grpc_read_timeout 4h;
     grpc_send_timeout 4h;
     grpc_socket_keepalive on;
-
-    # SSH WebSocket Bridge (/alyan or /Alyan) via HTTP/2 cleartext (h2c)
-    location ~* ^/(alyan|Alyan)$ {
-        proxy_redirect off;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:2095;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $alyan_connection_upgrade;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $alyan_real_ip;
-        proxy_set_header X-Forwarded-For $alyan_real_ip;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
 
     location /alyan-vless-grpc {
         client_max_body_size 0;
