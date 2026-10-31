@@ -1287,21 +1287,49 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
     uname = actor_info["username"]
     is_super = actor_info.get("role") == "super"
 
-    # Allow any non-viewer admin to update their own password
-    if payload.get("new_password"):
+    new_user_result = None
+
+    # Allow any non-viewer admin to update their credentials
+    if payload.get("new_password") or payload.get("new_username"):
         if actor_info.get("role") == "viewer":
             raise PermissionError("Viewer role cannot modify credentials")
-        new_pw = str(payload["new_password"])
-        if len(new_pw) < 6:
-            raise ValueError("Password must be at least 6 characters")
-        target_admin = str(payload.get("target_admin") or uname)
+
+        target_admin = str(payload.get("target_admin") or uname).strip()
+        if target_admin == "@super":
+            sup_row = conn.execute("SELECT username FROM admins WHERE role = 'super' ORDER BY rowid ASC LIMIT 1").fetchone()
+            target_admin = sup_row["username"] if sup_row else uname
+
         if target_admin != uname and not is_super:
-            raise PermissionError("Only Super Admins may reset other admin passwords")
-        conn.execute("UPDATE admins SET pass_hash = ? WHERE username = ?", (hash_password(new_pw), target_admin))
-        if target_admin == "admin" and CREDS_FILE.exists():
-            CREDS_FILE.write_text(new_pw + "\n", encoding="utf-8")
-            os.chmod(CREDS_FILE, 0o600)
-        add_audit(conn, uname, "password_change", f"user={target_admin}", ip)
+            raise PermissionError("Only Super Admins may reset other admin credentials")
+
+        actual_user = target_admin
+
+        # 1. Update Username if requested
+        if payload.get("new_username"):
+            new_u = validate_username(str(payload["new_username"]).strip())
+            if new_u.lower() != target_admin.lower():
+                existing = conn.execute("SELECT 1 FROM admins WHERE LOWER(username) = LOWER(?)", (new_u,)).fetchone()
+                if existing:
+                    raise ValueError(f"Admin username '{new_u}' already exists")
+                conn.execute("UPDATE admins SET username = ? WHERE username = ?", (new_u, target_admin))
+                conn.execute("UPDATE ssh_users SET owner = ? WHERE owner = ?", (new_u, target_admin))
+                conn.execute("UPDATE xray_users SET owner = ? WHERE owner = ?", (new_u, target_admin))
+                conn.execute("UPDATE audit_log SET actor = ? WHERE actor = ?", (new_u, target_admin))
+                add_audit(conn, uname, "username_change", f"old={target_admin} new={new_u}", ip)
+                actual_user = new_u
+                new_user_result = new_u
+
+        # 2. Update Password if requested
+        if payload.get("new_password"):
+            new_pw = str(payload["new_password"])
+            if len(new_pw) < 6:
+                raise ValueError("Password must be at least 6 characters")
+            conn.execute("UPDATE admins SET pass_hash = ? WHERE username = ?", (hash_password(new_pw), actual_user))
+            is_target_super = conn.execute("SELECT 1 FROM admins WHERE username = ? AND role = 'super'", (actual_user,)).fetchone()
+            if is_target_super and CREDS_FILE.exists():
+                CREDS_FILE.write_text(new_pw + "\n", encoding="utf-8")
+                os.chmod(CREDS_FILE, 0o600)
+            add_audit(conn, uname, "password_change", f"user={actual_user}", ip)
 
     # Global server mutations require Super Admin
     server_keys = {"domain", "panel_port", "ssl_renew", "banner", "bot", "maint"}
@@ -1374,7 +1402,10 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
         except Exception:
             pass
 
-    return {"ok": True, "cfg": build_cfg_dict(conn)}
+    res = {"ok": True, "cfg": build_cfg_dict(conn)}
+    if new_user_result:
+        res["new_username"] = new_user_result
+    return res
 
 
 def send_telegram_test(conn: sqlite3.Connection) -> dict:
@@ -1447,7 +1478,7 @@ def init_system(conn: sqlite3.Connection, domain: str, panel_port: int, iface: s
         os.chmod(BOT_CONF, 0o600)
 
     # Ensure primary Super Admin exists
-    adm = conn.execute("SELECT 1 FROM admins WHERE username = 'admin'").fetchone()
+    adm = conn.execute("SELECT 1 FROM admins WHERE role = 'super'").fetchone()
     if not adm:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
         init_pw = "".join(secrets.choice(alphabet) for _ in range(12))
@@ -1565,8 +1596,13 @@ def admin_add(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip: str
 def admin_del(conn: sqlite3.Connection, actor_info: dict, target_user: str, ip: str = "local") -> dict:
     if actor_info.get("role") != "super":
         raise PermissionError("Only Super Admins may revoke panel admins")
-    if target_user == "admin":
-        raise ValueError("Primary Super Admin cannot be removed")
+    target_row = conn.execute("SELECT * FROM admins WHERE username = ?", (target_user,)).fetchone()
+    if not target_row:
+        raise ValueError("Admin not found")
+    if target_row["role"] == "super":
+        super_count = conn.execute("SELECT COUNT(*) AS c FROM admins WHERE role = 'super'").fetchone()["c"]
+        if super_count <= 1:
+            raise ValueError("Primary Super Admin cannot be removed")
     if target_user == actor_info.get("username"):
         raise ValueError("Cannot delete your own active session")
     conn.execute("DELETE FROM admins WHERE username = ?", (target_user,))
@@ -1610,6 +1646,7 @@ def main():
     p_init.add_argument("--ip", default="127.0.0.1")
 
     sub.add_parser("get-initial-pass")
+    sub.add_parser("get-super-admin")
 
     p_ssl = sub.add_parser("ssl-issue")
     p_ssl.add_argument("--standalone", action="store_true")
@@ -1682,6 +1719,12 @@ def main():
             print(CREDS_FILE.read_text(encoding="utf-8").strip())
         else:
             print("See Webpanel Settings")
+        return
+
+    if args.cmd == "get-super-admin":
+        conn = get_db()
+        row = conn.execute("SELECT username FROM admins WHERE role = 'super' ORDER BY rowid ASC LIMIT 1").fetchone()
+        print(row["username"] if row else "admin")
         return
 
     conn = get_db()

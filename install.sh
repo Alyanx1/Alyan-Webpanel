@@ -447,13 +447,14 @@ for prt in 80 443 109 143 "$PANEL_PORT"; do
 done
 
 # ─── STEP 5: Success Summary & CLI Instruction ───────────────────────────────
+ADMIN_USER=$(/usr/local/bin/alyan-ctl get-super-admin 2>/dev/null || echo "admin")
 ADMIN_PASS=$(/usr/local/bin/alyan-ctl get-initial-pass 2>/dev/null || echo "See /etc/alyan/credentials.txt")
 
 echo -e "\n${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
 echo -e "${C_RED}┃${C_RST}  🔥 ${C_AMB}${C_BOLD}ALYAN WEBPANEL INSTALLATION COMPLETE!${C_RST}                           ${C_RED}┃${C_RST}"
 echo -e "${C_RED}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫${C_RST}"
 printf "${C_RED}┃${C_RST}  ${C_GRY}Web Panel URL  :${C_RST} ${C_GLD}${C_BOLD}https://%s:%s${C_RST}\n" "$CUSTOM_DOMAIN" "$PANEL_PORT"
-printf "${C_RED}┃${C_RST}  ${C_GRY}Admin Username :${C_RST} ${C_WHT}${C_BOLD}admin${C_RST}\n"
+printf "${C_RED}┃${C_RST}  ${C_GRY}Admin Username :${C_RST} ${C_WHT}${C_BOLD}%s${C_RST}\n" "$ADMIN_USER"
 printf "${C_RED}┃${C_RST}  ${C_GRY}Admin Password :${C_RST} ${C_ORG}${C_BOLD}%s${C_RST}\n" "$ADMIN_PASS"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}SSH Direct     :${C_RST} ${C_WHT}22, 109, 143${C_RST}   ${C_GRY}│  SSH WS / SSL :${C_RST} ${C_WHT}80, 443 (/alyan)${C_RST}"
 echo -e "${C_RED}┃${C_RST}  ${C_GRY}WS Payload     :${C_RST} ${C_AMB}GET /alyan HTTP/1.1[crlf]Host: ${CUSTOM_DOMAIN}[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${C_RST}"

@@ -384,6 +384,13 @@ async def api_settings(request: Request, sess: dict = Depends(require_session)):
         ip=client_ip(request),
         timeout=90.0,
     )
+    if res.get("ok") and (res.get("new_username") or b.get("new_username")):
+        new_u = str(res.get("new_username") or b.get("new_username")).strip()
+        sess["username"] = new_u
+        sid = verify_signed_sid(request.cookies.get(COOKIE_NAME))
+        if sid and sid in SESSIONS:
+            SESSIONS[sid]["username"] = new_u
+            save_sessions(SESSIONS)
     invalidate_read_cache()
     return res
 

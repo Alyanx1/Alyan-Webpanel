@@ -620,6 +620,7 @@
       if (b.ssl_renew) { DEMO.cfg.ssl_days = 90; logDemo('ssl_renew', DEMO.cfg.domain); }
       if (b.banner !== undefined) { DEMO.cfg.banner = b.banner; logDemo('banner_set', `${b.banner.length} bytes`); }
       if (b.bot) { Object.assign(DEMO.cfg.bot, b.bot); logDemo('bot_config', `enabled=${DEMO.cfg.bot.enabled}`); }
+      if (b.new_username) { DEMO.me.username = b.new_username.trim(); logDemo('username_change', `user=${DEMO.me.username}`); }
       if (b.new_password) logDemo('password_change', `user=${DEMO.me.username}`);
       if (b.maint) logDemo('maintenance', b.maint);
       return { ok: true, cfg: DEMO.cfg };
@@ -1581,15 +1582,16 @@
         <!-- Admin Security & Stack Repair -->
         ${isViewer ? '' : `
         <section class="mod">
-          <div class="mod-h"><h3>${ic('key')} Admin Security &amp; Stack Repair</h3><span class="sub">Password &amp; Wire-Speed Tune</span></div>
+          <div class="mod-h"><h3>${ic('key')} Admin Security &amp; Stack Repair</h3><span class="sub">Username, Password &amp; Stack Tune</span></div>
           <form class="stack" id="pwForm" autocomplete="off">
+            <label class="field"><span>Change Admin Username</span><input name="new_username" pattern="[A-Za-z0-9_-]{3,24}" value="${esc(STATE.me.username)}" placeholder="Enter username" autocomplete="off"/><small>a-z, A-Z, 0-9, _ - (3-24 chars)</small></label>
             <div class="row2">
-              <label class="field"><span>New Admin Password</span><input name="new_password" type="password" required minlength="6" placeholder="Enter new password" autocomplete="new-password"/></label>
-              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" required minlength="6" placeholder="Confirm password" autocomplete="new-password"/></label>
+              <label class="field"><span>New Password</span><input name="new_password" type="password" minlength="6" placeholder="Enter new password (blank = keep)" autocomplete="new-password"/></label>
+              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" minlength="6" placeholder="Confirm password" autocomplete="new-password"/></label>
             </div>
             <p class="note">One-click Stack Repair re-applies unthrottled Kernel BBR + FQ pacing, clears any NIC traffic shapers, and syncs HAProxy, Nginx, Dropbear &amp; Xray.</p>
             <div class="chips">
-              <button type="submit" class="btn btn-flame sm">${ic('lock')}<span>Update Password</span></button>
+              <button type="submit" class="btn btn-flame sm">${ic('lock')}<span>Save Credentials</span></button>
               <button type="button" class="btn sm" id="btnFixStack">${ic('refresh')}<span>Fix &amp; Optimize Stack</span></button>
             </div>
           </form>
@@ -1627,10 +1629,33 @@
       $('#pwForm').onsubmit = async (e) => {
         e.preventDefault();
         const fd = Object.fromEntries(new FormData(e.target).entries());
-        if (fd.new_password !== fd.confirm_password) { toast('Passwords do not match', 'err'); return; }
-        await api('/settings', { method: 'POST', body: { new_password: fd.new_password } });
-        e.target.reset();
-        toast('Admin password updated');
+        const body = {};
+        const trimmedU = (fd.new_username || '').trim();
+        if (trimmedU && trimmedU !== STATE.me.username) {
+          body.new_username = trimmedU;
+        }
+        if (fd.new_password) {
+          if (fd.new_password !== fd.confirm_password) {
+            toast('Passwords do not match', 'err');
+            return;
+          }
+          body.new_password = fd.new_password;
+        }
+        if (!body.new_username && !body.new_password) {
+          toast('No changes submitted', 'err');
+          return;
+        }
+        try {
+          await api('/settings', { method: 'POST', body });
+          if (body.new_username) {
+            STATE.me.username = body.new_username;
+            syncHud();
+          }
+          toast('Admin credentials updated successfully');
+          renderForge();
+        } catch (err) {
+          toast(err.message, 'err');
+        }
       };
       $('#btnFixStack').onclick = async () => {
         await api('/settings', { method: 'POST', body: { maint: 'fix_ws_ssl_stack' } });
@@ -1671,7 +1696,7 @@
               <div class="st"><span>SCOPE</span><b>${esc(a.scope.toUpperCase())}</b></div>
             </div>
             <div class="acc-act">
-              ${isViewer ? '' : (a.username === 'admin' ? `<span class="pill lit">Primary Root Owner</span>` : `<button class="btn btn-danger sm" data-adel="${esc(a.username)}">${ic('trash')}<span>Revoke</span></button>`)}
+              ${isViewer ? '' : ((a.role === 'super' && items.filter(x => x.role === 'super').length <= 1) || a.username === STATE.me.username ? `<span class="pill lit">${a.role === 'super' ? 'Primary Root Owner' : 'Current Session'}</span>` : `<button class="btn btn-danger sm" data-adel="${esc(a.username)}">${ic('trash')}<span>Revoke</span></button>`)}
             </div>
           </article>`).join('')}
       </div>`;

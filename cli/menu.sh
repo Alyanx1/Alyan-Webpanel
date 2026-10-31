@@ -383,15 +383,16 @@ opt_webpanel() {
   ov=$($CTL --actor cli overview)
   dom=$(echo "$ov" | jq -r '.cfg.domain')
   prt=$(echo "$ov" | jq -r '.cfg.panel_port')
+  adm_user=$($CTL get-super-admin 2>/dev/null || echo "admin")
   ipw=$($CTL get-initial-pass 2>/dev/null || echo "Hidden")
 
   echo -e "  ${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
   printf "  ${C_RED}┃${C_RST}  Web Panel URL  : ${C_GLD}${C_BOLD}https://%s:%s${C_RST}\n" "$dom" "$prt"
-  printf "  ${C_RED}┃${C_RST}  Admin Username : ${C_WHT}${C_BOLD}admin${C_RST}\n"
+  printf "  ${C_RED}┃${C_RST}  Admin Username : ${C_WHT}${C_BOLD}%s${C_RST}\n" "$adm_user"
   printf "  ${C_RED}┃${C_RST}  Admin Password : ${C_ORG}${C_BOLD}%s${C_RST}\n" "$ipw"
   echo -e "  ${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}"
   echo -e "  ${C_ORG}[1]${C_WHT} Change Web Panel HTTPS Port${C_RST}"
-  echo -e "  ${C_ORG}[2]${C_WHT} Reset Primary 'admin' Password${C_RST}"
+  echo -e "  ${C_ORG}[2]${C_WHT} Change user pass of web panel${C_RST}"
   echo -e "  ${C_ORG}[3]${C_WHT} Restart Web Panel Service${C_RST}"
   read -rp "  Choose [1-3, Enter=back]: " wopt </dev/tty
   case "$wopt" in
@@ -402,11 +403,21 @@ opt_webpanel() {
         echo "$res" | jq -e '.ok' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Web Panel moved to https://${dom}:${nprt}${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
       fi ;;
     2)
-      read -rp "  Enter new password for 'admin' (min 6 chars): " npw </dev/tty
-      if [[ -n "$npw" ]]; then
-        payload=$(jq -nc --arg p "$npw" '{new_password:$p,target_admin:"admin"}')
+      echo -e "\n  ${C_AMB}${C_BOLD}🔑 Change user pass of web panel${C_RST}"
+      read -rp "  Enter new Web Panel Username: " nuser </dev/tty
+      read -rp "  Enter new Web Panel Password (min 6 chars): " npw </dev/tty
+      if [[ -n "$nuser" && -n "$npw" ]]; then
+        payload=$(jq -nc --arg u "$nuser" --arg p "$npw" '{new_username:$u,new_password:$p,target_admin:"@super"}')
         res=$($CTL --actor cli settings --json "$payload" 2>&1)
-        echo "$res" | jq -e '.ok' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Admin password updated!${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
+        if echo "$res" | jq -e '.ok' >/dev/null 2>&1; then
+          echo -e "  ${C_OK}✔ Web Panel credentials updated successfully!${C_RST}"
+          echo -e "  ${C_WHT}New Username : ${C_GLD}${C_BOLD}${nuser}${C_RST}"
+          echo -e "  ${C_WHT}New Password : ${C_ORG}${C_BOLD}${npw}${C_RST}"
+        else
+          echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
+        fi
+      else
+        echo -e "  ${C_ERR}✖ Both username and password are required.${C_RST}"
       fi ;;
     3)
       systemctl restart alyan-panel nginx
