@@ -139,14 +139,19 @@ def clean_public_ip(raw_token: str) -> str | None:
 def device_key_for_ip(ip_str: str) -> str:
     """
     Normalize a client IP to a unique device key:
-      - Unwrapped Cloudflare Anycast edge IPs collapse to 'cf-edge' so PoP rotation never fakes 30 IPs.
+      - Unwrapped Cloudflare or CloudFront edge IPs collapse to 'cdn-edge' so PoP rotation never fakes 30 IPs.
       - IPv6 SLAAC privacy extensions collapse to their /64 subscriber prefix so 1 mobile phone = 1 device.
       - Standard public IPv4 maps 1:1 to itself.
     """
     try:
         addr = ipaddress.ip_address(ip_str)
         if any(addr in net for net in CF_EDGE_NETS):
-            return "cf-edge"
+            return "cdn-edge"
+        # Known AWS CloudFront edge prefixes if any direct edge leaked
+        if isinstance(addr, ipaddress.IPv4Address):
+            s_ip = str(addr)
+            if s_ip.startswith(("143.204.", "52.84.", "54.192.", "54.230.", "54.239.", "54.240.", "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.", "13.227.", "13.249.", "18.64.", "18.65.", "18.66.", "18.67.", "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.", "64.252.", "65.8.", "65.9.", "70.132.", "99.84.", "99.86.", "108.138.", "108.156.", "108.157.", "108.158.", "108.159.", "204.246.", "205.251.")):
+                return "cdn-edge"
         if isinstance(addr, ipaddress.IPv6Address):
             net64 = ipaddress.IPv6Network((addr, 64), strict=False)
             return f"v6:{net64.network_address}/64"
@@ -585,6 +590,36 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
     return sessions_by_user, deltas
 
 
+PROTO_PORTS = {
+    "vless": (10001, 10011, 10031),
+    "vmess": (10002, 10012),
+    "trojan": (10003, 10013, 10023),
+}
+
+
+def scan_active_proto_sockets() -> dict[str, int]:
+    """Return count of active ESTAB sockets on Xray inbound ports."""
+    counts = {"vless": 0, "vmess": 0, "trojan": 0}
+    try:
+        out = subprocess.check_output(["ss", "-tn"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        for ln in out.splitlines():
+            if "ESTAB" not in ln:
+                continue
+            cols = ln.split()
+            if len(cols) < 5:
+                continue
+            try:
+                lport = int(cols[3].rsplit(":", 1)[-1])
+            except ValueError:
+                continue
+            for pr, ports in PROTO_PORTS.items():
+                if lport in ports:
+                    counts[pr] += 1
+    except Exception:
+        pass
+    return counts
+
+
 def poll_xray_stats_and_ips(
     xray_users: list[sqlite3.Row],
     ws_ips: list[str],
@@ -594,8 +629,8 @@ def poll_xray_stats_and_ips(
     """
     Returns:
       - deltas: uuid -> bytes transferred since last 2s tick
-      - ips_by_uuid: uuid -> sorted clean unique client IPs (1 IP per unique device)
-      - dev_count_by_uuid: uuid -> count of distinct simultaneously active devices in fresh window
+      - ips_by_uuid: uuid -> sorted clean unique client IPs (1 IP per active connection)
+      - dev_count_by_uuid: uuid -> count of distinct active devices
     """
     tag_to_uuid: dict[str, str] = {}
     uuid_to_proto: dict[str, str] = {}
@@ -628,16 +663,17 @@ def poll_xray_stats_and_ips(
             pass
 
     now_ts = time.time()
-    fresh_window_devs: dict[str, set[str]] = {}
+    proto_socket_counts = scan_active_proto_sockets()
     nginx_proto_ips = read_recent_nginx_xray_ips()
+    latest_ip_from_log: dict[str, str] = {}
 
     if XRAY_ACCESS_LOG.exists():
         try:
             with XRAY_ACCESS_LOG.open("rb") as f:
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
-                f.seek(max(0, sz - 65536))
-                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-300:]
+                f.seek(max(0, sz - 32768))
+                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-150:]
             for ln in tail_lines:
                 if "accepted" not in ln or "email:" not in ln:
                     continue
@@ -654,7 +690,7 @@ def poll_xray_stats_and_ips(
 
                 if was_loop or not matched_ip:
                     # Connection proxied through Nginx/HAProxy (127.0.0.1 loopback)
-                    # Priority 1: Nginx logged real client IP for this protocol
+                    # Priority 1: Nginx logged real client IP for this protocol (unwrapped from CloudFront / Cloudflare)
                     if proto in nginx_proto_ips and nginx_proto_ips[proto]:
                         matched_ip = nginx_proto_ips[proto][-1]
                     # Priority 2: HAProxy active backend sessions
@@ -665,13 +701,8 @@ def poll_xray_stats_and_ips(
                     elif h2c_ips:
                         matched_ip = h2c_ips[0]
 
-                if not matched_ip:
-                    continue
-
-                dev_k = device_key_for_ip(matched_ip)
-                dev_map = XRAY_ACTIVE_DEVICES.setdefault(uid, {})
-                dev_map[dev_k] = {"ip": matched_ip, "ts": now_ts}
-                fresh_window_devs.setdefault(uid, set()).add(dev_k)
+                if matched_ip:
+                    latest_ip_from_log[uid] = matched_ip
         except Exception:
             pass
 
@@ -683,34 +714,50 @@ def poll_xray_stats_and_ips(
         proto = r["proto"].lower()
         dev_map = XRAY_ACTIVE_DEVICES.setdefault(uid, {})
         active_traffic = deltas.get(uid, 0) > 0
+        active_sockets = proto_socket_counts.get(proto, 0)
 
-        # If data is actively transferring right now, keep current device alive or adopt active IP:
-        if active_traffic:
-            if dev_map:
-                for k in dev_map:
-                    dev_map[k]["ts"] = now_ts
-            else:
-                adopted_ip = None
-                if proto in nginx_proto_ips and nginx_proto_ips[proto]:
-                    adopted_ip = nginx_proto_ips[proto][-1]
-                elif proto in ("vless", "vmess") and ws_ips:
-                    adopted_ip = ws_ips[0]
-                elif proto == "trojan":
-                    adopted_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
-                elif h2c_ips:
-                    adopted_ip = h2c_ips[0]
-                elif ws_ips:
-                    adopted_ip = ws_ips[0]
+        # ── REAL-TIME DISCONNECT (within 2 seconds) ──
+        # If there are NO active sockets for this protocol and NO bytes flowing:
+        if not active_traffic and active_sockets == 0:
+            dev_map.clear()
+            ips_by_uuid[uid] = []
+            dev_count_by_uuid[uid] = 0
+            continue
 
-                if adopted_ip:
-                    dev_map[device_key_for_ip(adopted_ip)] = {"ip": adopted_ip, "ts": now_ts}
+        # If data is actively transferring OR active TCP sockets exist:
+        best_ip = None
+        if uid in latest_ip_from_log:
+            best_ip = latest_ip_from_log[uid]
+        elif proto in nginx_proto_ips and nginx_proto_ips[proto]:
+            best_ip = nginx_proto_ips[proto][-1]
+        elif proto in ("vless", "vmess") and ws_ips:
+            best_ip = ws_ips[0]
+        elif proto == "trojan":
+            best_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
+        elif h2c_ips:
+            best_ip = h2c_ips[0]
 
-        # Prune any device idle > 90 seconds (generous idle window for long-lived tunnel streams)
-        for stale_k in [k for k, v in dev_map.items() if now_ts - v["ts"] > 90.0]:
+        if best_ip:
+            dev_k = device_key_for_ip(best_ip)
+            dev_map[dev_k] = {"ip": best_ip, "ts": now_ts}
+            # Strictly limit number of recorded devices to active sockets count (prevents 2-3 old IPs showing up!)
+            max_devs = max(1, active_sockets)
+            if len(dev_map) > max_devs:
+                sorted_keys = sorted(dev_map.keys(), key=lambda k: dev_map[k]["ts"], reverse=True)
+                for k in sorted_keys[max_devs:]:
+                    dev_map.pop(k, None)
+        elif dev_map:
+            for k in dev_map:
+                dev_map[k]["ts"] = now_ts
+
+        # Short timeout (4s) for any lingering device
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 4.0]:
             dev_map.pop(stale_k, None)
 
         ips_by_uuid[uid] = sorted({v["ip"] for v in dev_map.values()})
-        dev_count_by_uuid[uid] = len(fresh_window_devs.get(uid, set())) or (len(ips_by_uuid[uid]) if active_traffic else 0)
+        dev_count_by_uuid[uid] = len(ips_by_uuid[uid])
+
+    return deltas, ips_by_uuid, dev_count_by_uuid
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 

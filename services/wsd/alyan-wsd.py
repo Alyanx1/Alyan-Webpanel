@@ -169,6 +169,36 @@ def strip_ws_headers(data: bytes) -> tuple[bool, bytes]:
     return True, b""
 
 
+async def pipe_server_to_client(s_reader: asyncio.StreamReader, c_writer: asyncio.StreamWriter, stat_dict: dict):
+    first_chunk = True
+    try:
+        while True:
+            chunk = await s_reader.read(65536)
+            if not chunk:
+                break
+            if first_chunk:
+                first_chunk = False
+                if chunk.startswith(b"SSH-2.0-"):
+                    # Custom brand banner requested by user
+                    nl_pos = chunk.find(b"\r\n")
+                    if nl_pos != -1:
+                        chunk = b"SSH-2.0-ALYAN_Server\r\n" + chunk[nl_pos + 2:]
+                    else:
+                        nl_pos = chunk.find(b"\n")
+                        if nl_pos != -1:
+                            chunk = b"SSH-2.0-ALYAN_Server\n" + chunk[nl_pos + 1:]
+            stat_dict["tx"] += len(chunk)
+            c_writer.write(chunk)
+            await c_writer.drain()
+    except (ConnectionError, asyncio.CancelledError, OSError):
+        pass
+    finally:
+        try:
+            c_writer.close()
+        except Exception:
+            pass
+
+
 async def pipe_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stat_dict: dict, key: str):
     try:
         while True:
@@ -229,9 +259,12 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
                 if ":" in line:
                     k, v = line.split(":", 1)
                     hdr_map[k.strip().lower()] = v.strip()
-            for hk in ("cf-connecting-ip", "true-client-ip", "x-forwarded-for", "x-real-ip"):
+            for hk in ("cloudfront-viewer-address", "cf-connecting-ip", "true-client-ip", "x-forwarded-for", "x-real-ip"):
                 if hk in hdr_map:
-                    cand = normalize_ip(hdr_map[hk].split(",")[0])
+                    raw_val = hdr_map[hk]
+                    if ":" in raw_val and not raw_val.startswith("["):
+                        raw_val = raw_val.split(":", 1)[0]
+                    cand = normalize_ip(raw_val.split(",")[0])
                     if cand and cand not in ("127.0.0.1", "::1"):
                         real_ip = cand
                         break
@@ -270,7 +303,7 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
 
         await asyncio.gather(
             pipe_stream(c_reader, s_writer, stat_entry, "rx"),
-            pipe_stream(s_reader, c_writer, stat_entry, "tx"),
+            pipe_server_to_client(s_reader, c_writer, stat_entry),
         )
     except Exception:
         try:

@@ -7,52 +7,37 @@ map $http_upgrade $alyan_connection_upgrade {
     ''      close;
 }
 
-# Official Cloudflare IPv4 + IPv6 CIDRs: unwrap client IP headers ONLY from trusted CDN edges
-geo $proxy_protocol_addr $alyan_is_trusted_cdn {
-    default              0;
-    127.0.0.1/32         1;
-    173.245.48.0/20      1;
-    103.21.244.0/22      1;
-    103.22.200.0/22      1;
-    103.31.4.0/22        1;
-    141.101.64.0/18      1;
-    108.162.192.0/18     1;
-    190.93.240.0/20      1;
-    188.114.96.0/20      1;
-    197.234.240.0/22     1;
-    198.41.128.0/17      1;
-    162.158.0.0/15       1;
-    104.16.0.0/13        1;
-    104.24.0.0/14        1;
-    172.64.0.0/13        1;
-    131.0.72.0/22        1;
-    2400:cb00::/32       1;
-    2606:4700::/32       1;
-    2803:f800::/32       1;
-    2405:b500::/32       1;
-    2405:8100::/32       1;
-    2a06:98c0::/29       1;
-    2c0f:f248::/32       1;
+# CloudFront Viewer Address (AWS CloudFront Real Client IP without :port)
+map $http_cloudfront_viewer_address $alyan_cf_viewer_ip {
+    default                      "";
+    "~^([0-9a-fA-F\.:]+):\d+"     $1;
 }
 
+# First IP from X-Forwarded-For
 map $http_x_forwarded_for $alyan_xff_first {
     default                      "";
     "~^([0-9a-fA-F\.:]+)"        $1;
 }
 
-map $http_true_client_ip $alyan_cdn_fallback {
+# Unified CDN Header Priority: CloudFront Viewer Address -> CF-Connecting-IP -> True-Client-IP -> X-Forwarded-For
+map $alyan_cf_viewer_ip $alyan_cdn_ip_step1 {
+    ""      $http_cf_connecting_ip;
+    default $alyan_cf_viewer_ip;
+}
+
+map $alyan_cdn_ip_step1 $alyan_cdn_ip_step2 {
+    ""      $http_true_client_ip;
+    default $alyan_cdn_ip_step1;
+}
+
+map $alyan_cdn_ip_step2 $alyan_cdn_resolved_ip {
     ""      $alyan_xff_first;
-    default $http_true_client_ip;
+    default $alyan_cdn_ip_step2;
 }
 
-map $http_cf_connecting_ip $alyan_cdn_client_ip {
-    ""      $alyan_cdn_fallback;
-    default $http_cf_connecting_ip;
-}
-
-map "$alyan_is_trusted_cdn:$alyan_cdn_client_ip" $alyan_real_ip {
-    "~^1:(.+)$" $1;
-    default     $proxy_protocol_addr;
+map $alyan_cdn_resolved_ip $alyan_real_ip {
+    ""      $proxy_protocol_addr;
+    default $alyan_cdn_resolved_ip;
 }
 
 log_format alyan_xray '$time_iso8601 $alyan_real_ip $status $request_uri';
@@ -75,6 +60,23 @@ server {
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/alyan-acme;
         default_type "text/plain";
+    }
+
+    # SSH WebSocket Bridge (/alyan or /Alyan) via CDN or Direct
+    location ~* ^/(alyan|Alyan)$ {
+        proxy_redirect off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
+        proxy_pass http://127.0.0.1:2095;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $alyan_connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 
     location /alyan-vless {
@@ -163,6 +165,23 @@ server {
     grpc_read_timeout 4h;
     grpc_send_timeout 4h;
     grpc_socket_keepalive on;
+
+    # SSH WebSocket Bridge (/alyan or /Alyan) via HTTP/2 cleartext (h2c)
+    location ~* ^/(alyan|Alyan)$ {
+        proxy_redirect off;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
+        proxy_pass http://127.0.0.1:2095;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $alyan_connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $alyan_real_ip;
+        proxy_set_header X-Forwarded-For $alyan_real_ip;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
 
     location /alyan-vless-grpc {
         client_max_body_size 0;

@@ -220,6 +220,26 @@ if [[ "${1:-}" == "--update" ]]; then
   rebuild_and_restart() {
     : > /var/log/xray/access.log 2>/dev/null || true
     rm -f /run/alyan-live.json /run/alyan-ssl-cache.json
+    if [[ -f /usr/sbin/dropbear ]]; then
+      python3 -c "
+import re
+p = '/usr/sbin/dropbear'
+try:
+    with open(p, 'rb') as f:
+        data = f.read()
+    m = re.search(rb'SSH-2.0-dropbear_[^\r\n\x00]+', data)
+    if m:
+        old_b = m.group(0)
+        new_b = b'SSH-2.0-ALYAN_Server'
+        if len(new_b) <= len(old_b):
+            replacement = new_b + b'\x00' * (len(old_b) - len(new_b))
+            patched = data[:m.start()] + replacement + data[m.end():]
+            with open(p, 'wb') as f:
+                f.write(patched)
+except Exception:
+    pass
+" 2>/dev/null || true
+    fi
     systemctl daemon-reload
     /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
     for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
@@ -307,6 +327,27 @@ section_hdr "3/5" "Forging Tunneling Stack (Nginx · HAProxy · Dropbear · Xray
 install_daemons_pkg() {
   apt-get install -y --no-install-recommends dropbear nginx haproxy
   systemctl stop nginx haproxy dropbear 2>/dev/null || true
+  # Brand Dropbear SSH identification banner to SSH-2.0-ALYAN_Server
+  if [[ -f /usr/sbin/dropbear ]]; then
+    python3 -c "
+import re
+p = '/usr/sbin/dropbear'
+try:
+    with open(p, 'rb') as f:
+        data = f.read()
+    m = re.search(rb'SSH-2.0-dropbear_[^\r\n\x00]+', data)
+    if m:
+        old_b = m.group(0)
+        new_b = b'SSH-2.0-ALYAN_Server'
+        if len(new_b) <= len(old_b):
+            replacement = new_b + b'\x00' * (len(old_b) - len(new_b))
+            patched = data[:m.start()] + replacement + data[m.end():]
+            with open(p, 'wb') as f:
+                f.write(patched)
+except Exception:
+    pass
+" 2>/dev/null || true
+  fi
 }
 run_task 44 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_pkg
 run_task 54 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files
