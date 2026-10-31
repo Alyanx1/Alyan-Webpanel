@@ -177,41 +177,6 @@ def strip_ws_headers(data: bytes) -> tuple[bool, bytes]:
     return True, b""
 
 
-async def pipe_server_to_client(s_reader: asyncio.StreamReader, c_writer: asyncio.StreamWriter, stat_dict: dict):
-    first_chunk = True
-    banner_buf = bytearray()
-    try:
-        while True:
-            chunk = await s_reader.read(65536)
-            if not chunk:
-                break
-            if first_chunk:
-                banner_buf.extend(chunk)
-                if b"\n" not in banner_buf and len(banner_buf) < 256:
-                    continue
-                first_chunk = False
-                full_initial = bytes(banner_buf)
-                if full_initial.startswith(b"SSH-2.0-"):
-                    nl_pos = full_initial.find(b"\r\n")
-                    if nl_pos != -1:
-                        chunk = b"SSH-2.0-ALYAN_Server\r\n" + full_initial[nl_pos + 2:]
-                    else:
-                        nl_pos = full_initial.find(b"\n")
-                        chunk = b"SSH-2.0-ALYAN_Server\n" + full_initial[nl_pos + 1:]
-                else:
-                    chunk = full_initial
-            stat_dict["tx"] += len(chunk)
-            c_writer.write(chunk)
-            await c_writer.drain()
-    except (ConnectionError, asyncio.CancelledError, OSError):
-        pass
-    finally:
-        try:
-            c_writer.close()
-        except Exception:
-            pass
-
-
 async def pipe_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stat_dict: dict, key: str):
     try:
         while True:
@@ -316,7 +281,7 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
 
         await asyncio.gather(
             pipe_stream(c_reader, s_writer, stat_entry, "rx"),
-            pipe_server_to_client(s_reader, c_writer, stat_entry),
+            pipe_stream(s_reader, c_writer, stat_entry, "tx"),
         )
     except Exception:
         try:

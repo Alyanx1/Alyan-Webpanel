@@ -110,9 +110,40 @@ done
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "${BACKUP_DIR}/backup_timestamp.txt"
 echo -e "  ${C_OK}✔ Backup saved.${C_RST}"
 
-# Step 2: Ensure Clean Dropbear Binary
-echo -e "  ${C_AMB}[2/4] Verifying clean Dropbear package binary...${C_RST}"
+# Step 2: Ensure Clean Dropbear Binary & Apply SSH-2.0-ALYAN_Server Branding
+echo -e "  ${C_AMB}[2/4] Configuring Dropbear SSH banner branding...${C_RST}"
+systemctl stop dropbear 2>/dev/null || true
 apt-get install --reinstall -y dropbear >/dev/null 2>&1 || true
+
+# Apply safe binary patch in /usr/sbin/dropbear so KEX hash and banner both use SSH-2.0-ALYAN_Server
+if [[ -f /usr/sbin/dropbear ]]; then
+  python3 -c "
+import re, shutil, os
+p = '/usr/sbin/dropbear'
+try:
+    with open(p, 'rb') as f:
+        data = f.read()
+    m = re.search(rb'SSH-2.0-dropbear_[^\r\n\x00]+', data)
+    if m:
+        old_b = m.group(0)
+        new_b = b'SSH-2.0-ALYAN_Server'
+        if len(new_b) <= len(old_b):
+            replacement = new_b + b'\x00' * (len(old_b) - len(new_b))
+            patched = data[:m.start()] + replacement + data[m.end():]
+            with open('/tmp/dropbear.tmp', 'wb') as f_out:
+                f_out.write(patched)
+            shutil.move('/tmp/dropbear.tmp', p)
+            os.chmod(p, 0o755)
+except Exception:
+    pass
+" 2>/dev/null || true
+
+  # Test if patched dropbear binary executes normally
+  if ! /usr/sbin/dropbear -h >/dev/null 2>&1; then
+    # Fallback to pristine binary if patch causes execution issue
+    apt-get install --reinstall -y dropbear >/dev/null 2>&1 || true
+  fi
+fi
 
 # Step 3: Fetch and Deploy Updated Files
 echo -e "  ${C_AMB}[3/4] Deploying updated Guard, WSD & Router configs...${C_RST}"
