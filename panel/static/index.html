@@ -16,7 +16,7 @@
 
   <!-- ═════════════ LOGIN ═════════════ -->
   <section id="login" class="login" hidden>
-    <form class="login-card" id="loginForm" autocomplete="on">
+    <form class="login-card" id="loginForm" autocomplete="off">
       <div class="login-logo">
         <svg viewBox="0 0 64 64" class="flame-svg big"><use href="#flame" /></svg>
         <span class="login-ring"></span>
@@ -24,9 +24,9 @@
       <h1 class="brand-xl"><span>ALYAN</span> WEBPANEL</h1>
       <p class="muted center">Tunnel Command Deck</p>
       <label class="field"><span>Username</span>
-        <input name="username" autocomplete="username" required placeholder="admin" /></label>
+        <input name="username" autocomplete="off" required placeholder="Enter username" value="" /></label>
       <label class="field"><span>Password</span>
-        <input name="password" type="password" autocomplete="current-password" required placeholder="••••••••" /></label>
+        <input name="password" type="password" autocomplete="new-password" required placeholder="Enter password" value="" /></label>
       <button class="btn btn-flame wide" type="submit"><span>Ignite Session</span></button>
       <p class="login-err" id="loginErr"></p>
       <p class="tiny dim center" id="loginFoot">secure session · rate-limited</p>

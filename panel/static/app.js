@@ -319,8 +319,8 @@
 
   /* ─── Formatting & QR Helpers ─── */
   const fmtBytes = (b) => {
-    const n = Number(b) || 0;
-    if (n < 1024) return n + ' B';
+    const n = Math.max(0, Number(b) || 0);
+    if (n < 1024) return Math.round(n) + ' B';
     const u = ['KB', 'MB', 'GB', 'TB'];
     let i = -1, v = n;
     do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
@@ -738,20 +738,26 @@
 
   /* ═════════════════════ 1. CORE (Flame Launcher + Centered % Core) ═════════════════════ */
   async function renderCore() {
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'COMMAND DECK · LIVE TELEMETRY',
       'Core',
       'Real-time reactor load, multiplexed 80/443 health & interactive service tiles',
-      `<button class="btn sm" id="btnCoreRefresh">${ic('refresh')}<span>Sync</span></button>
+      `<button class="btn sm" id="btnCoreRefresh">${ic('refresh')}<span>Sync</span></button>` +
+      (isViewer ? '' : `
        <button class="btn-flame-launcher" id="btnFlameLauncher" type="button">
          <canvas class="btn-fire-cv" id="launcherFire"></canvas>
          <svg viewBox="0 0 64 64" class="flame-svg"><use href="#flame"/></svg>
          <span>Flame Launcher</span>
-       </button>`
+       </button>`)
     );
-    attachRealFire($('#launcherFire'), { w: 56, h: 32, cool: 4.1 });
+    if (!isViewer && $('#launcherFire')) {
+      attachRealFire($('#launcherFire'), { w: 56, h: 32, cool: 4.1 });
+    }
     $('#btnCoreRefresh').onclick = () => renderCore();
-    $('#btnFlameLauncher').onclick = openQuickSheet;
+    if (!isViewer && $('#btnFlameLauncher')) {
+      $('#btnFlameLauncher').onclick = openQuickSheet;
+    }
 
     const draw = async () => {
       const d = await api('/overview');
@@ -836,7 +842,7 @@
         <section class="mod" style="margin-top:14px">
           <div class="mod-h">
             <h3>${ic('engine')} Ember Service Matrix</h3>
-            <span class="sub">Click any tile to flip for Start / Restart / Stop / Logs</span>
+            <span class="sub">${isViewer ? 'Active service health & status' : 'Click any tile to flip for Start / Restart / Stop / Logs'}</span>
           </div>
           <div class="ember-grid">
             ${d.services.map(s => `
@@ -870,6 +876,7 @@
       $$('[data-nav]', $('#view')).forEach(el => { el.onclick = () => go(el.dataset.nav); });
       $$('.ember', $('#view')).forEach(tile => {
         tile.onclick = (e) => {
+          if (isViewer) return;
           if (e.target.closest('[data-unflip]')) { tile.classList.remove('flip'); return; }
           if (e.target.closest('[data-sact]')) return;
           tile.classList.toggle('flip');
@@ -903,6 +910,7 @@
   async function renderTunnels() {
     let items = [];
     let sshBusy = false;
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
 
     const sshSheetHtml = (liveIps) => liveIps.length
       ? `<div class="tbl-wrap"><table><thead><tr><th>User</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
@@ -918,11 +926,14 @@
       'SSH · WS · SSL',
       'SSH Accounts',
       `Direct (22, 109, 143) · SSL (443) · WebSocket (80/443 → ${STATE.cfg.ws_path || '/alyan'})`,
-      `<button class="btn sm" id="btnLiveIps">${ic('wifi')}<span id="btnLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
+      isViewer ? '' : `
+       <button class="btn sm" id="btnLiveIps">${ic('wifi')}<span id="btnLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
        <button class="btn btn-flame sm" id="btnAddSsh">${ic('plus')}<span>Create SSH Account</span></button>`
     );
-    $('#btnAddSsh').onclick = () => openSshForm();
-    $('#btnLiveIps').onclick = () => openSheet('Live Connected SSH IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="sshLiveSheetBody">${sshSheetHtml(getLiveIps())}</div>`);
+    if (!isViewer) {
+      const btnAdd = $('#btnAddSsh'); if (btnAdd) btnAdd.onclick = () => openSshForm();
+      const btnLive = $('#btnLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected SSH IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="sshLiveSheetBody">${sshSheetHtml(getLiveIps())}</div>`);
+    }
 
     $('#view').innerHTML = `
       <div class="toolbar">
@@ -945,9 +956,25 @@
       const filtered = items.filter(u => u.username.toLowerCase().includes(STATE.searchSsh.toLowerCase()));
       host.innerHTML = filtered.length ? `<div class="cards">${filtered.map(u => {
         const isDis = u.status === 'disabled';
+        const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
+        if (isViewer) {
+          return `
+          <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
+            <div class="acc-top">
+              ${hexAvatar(u.username[0].toUpperCase(), false)}
+              <div>
+                <div class="acc-n">${esc(u.username)}</div>
+                <div class="acc-m">SSH Account</div>
+              </div>
+            </div>
+            <div class="meter">
+              <div class="meter-h"><span>DATA QUOTA</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+              <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
+            </div>
+          </article>`;
+        }
         const ipList = isDis ? [] : (u.ips || []);
         const onlineCnt = isDis ? 0 : (u.online || ipList.length || 0);
-        const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
@@ -977,32 +1004,34 @@
         </article>`;
       }).join('')}</div>` : `<div class="mod empty">${ic('tunnel')}<p>No matching SSH accounts found.</p></div>`;
 
-      $$('[data-ticket]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.ticket); if (u) showSshTicket(u); }; });
-      $$('[data-toggle]', host).forEach(b => {
-        b.onclick = async () => {
-          const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
-          try {
-            await api(`/ssh/${encodeURIComponent(b.dataset.toggle)}`, { method: 'PATCH', body: { status: nextStatus } });
-            toast(`SSH account ${b.dataset.toggle} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
-            const fresh = await api('/ssh');
-            items = fresh.items || [];
-            paintCards();
-          } catch (err) { toast(err.message, 'err'); }
-        };
-      });
-      $$('[data-edit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.edit); if (u) openSshForm(u); }; });
-      $$('[data-del]', host).forEach(b => {
-        b.onclick = async () => {
-          const card = b.closest('.acc');
-          try {
-            await api(`/ssh/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
-            toast(`Deleted SSH account ${b.dataset.del}`);
-            await nanoDisintegrate(card);
-            items = items.filter(x => x.username !== b.dataset.del);
-            paintCards();
-          } catch (err) { toast(err.message, 'err'); }
-        };
-      });
+      if (!isViewer) {
+        $$('[data-ticket]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.ticket); if (u) showSshTicket(u); }; });
+        $$('[data-toggle]', host).forEach(b => {
+          b.onclick = async () => {
+            const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
+            try {
+              await api(`/ssh/${encodeURIComponent(b.dataset.toggle)}`, { method: 'PATCH', body: { status: nextStatus } });
+              toast(`SSH account ${b.dataset.toggle} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
+              const fresh = await api('/ssh');
+              items = fresh.items || [];
+              paintCards();
+            } catch (err) { toast(err.message, 'err'); }
+          };
+        });
+        $$('[data-edit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.username === b.dataset.edit); if (u) openSshForm(u); }; });
+        $$('[data-del]', host).forEach(b => {
+          b.onclick = async () => {
+            const card = b.closest('.acc');
+            try {
+              await api(`/ssh/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
+              toast(`Deleted SSH account ${b.dataset.del}`);
+              await nanoDisintegrate(card);
+              items = items.filter(x => x.username !== b.dataset.del);
+              paintCards();
+            } catch (err) { toast(err.message, 'err'); }
+          };
+        });
+      }
     };
 
     $('#sshSearch').oninput = (e) => { STATE.searchSsh = e.target.value; paintCards(); };
@@ -1053,10 +1082,11 @@
   }
 
   function openSshForm(existing = null) {
+    if (STATE.me && STATE.me.role === 'viewer') return;
     openSheet(existing ? `Edit ${existing.username}` : 'Create SSH Account', 'SSH PROVISIONER', `
-      <form class="stack" id="sshForm">
-        ${existing ? '' : `<label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" placeholder="Alyan" /><small>a-z, A-Z, 0-9, _ - (max 31 chars)</small></label>`}
-        <label class="field"><span>${existing ? 'New Password (blank = keep)' : 'Password'}</span><input name="password" ${existing ? '' : 'required'} placeholder="1234" /></label>
+      <form class="stack" id="sshForm" autocomplete="off">
+        ${existing ? '' : `<label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" placeholder="Enter username" autocomplete="off" /><small>a-z, A-Z, 0-9, _ - (max 31 chars)</small></label>`}
+        <label class="field"><span>${existing ? 'New Password (blank = keep)' : 'Password'}</span><input name="password" ${existing ? '' : 'required'} placeholder="Enter password" autocomplete="new-password" /></label>
         <div class="row3">
           <label class="field"><span>Days</span><div class="stepper"><button type="button">−</button><input name="days" type="number" min="1" value="${existing ? Math.max(1, daysLeft(existing.expiry)) : 30}" data-step="5"/><button type="button">+</button></div></label>
           <label class="field"><span>GB (0=∞)</span><div class="stepper"><button type="button">−</button><input name="gb_limit" type="number" min="0" value="${existing ? existing.gb_limit : 0}" data-step="10"/><button type="button">+</button></div></label>
@@ -1084,6 +1114,7 @@
     let items = [];
     let xrayBusy = false;
     const protos = ['vless', 'vmess', 'trojan'];
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
 
     const xraySheetHtml = (liveIps) => liveIps.length
       ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.proto)}</td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
@@ -1100,11 +1131,14 @@
         'XRAY CORE',
         'Xray',
         'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
-        `<button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
+        isViewer ? '' : `
+         <button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
          <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
       );
-      $('#btnAddXray').onclick = () => openXrayForm(STATE.xrayProto);
-      $('#btnXrayLiveIps').onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
+      if (!isViewer) {
+        const btnAdd = $('#btnAddXray'); if (btnAdd) btnAdd.onclick = () => openXrayForm(STATE.xrayProto);
+        const btnLive = $('#btnXrayLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
+      }
     };
     syncBayHeader();
 
@@ -1136,9 +1170,25 @@
       const list = protoAll.filter(u => u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
       host.innerHTML = list.length ? `<div class="cards">${list.map(u => {
         const isDis = u.status === 'disabled';
+        const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
+        if (isViewer) {
+          return `
+          <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
+            <div class="acc-top">
+              ${hexAvatar(u.username[0].toUpperCase(), false)}
+              <div>
+                <div class="acc-n">${esc(u.username)}</div>
+                <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · Client</div>
+              </div>
+            </div>
+            <div class="meter">
+              <div class="meter-h"><span>TRAFFIC</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+              <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
+            </div>
+          </article>`;
+        }
         const ipList = isDis ? [] : (u.ips || []);
         const onlineCnt = isDis ? 0 : (ipList.length || u.online || 0);
-        const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
@@ -1171,34 +1221,36 @@
         </article>`;
       }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${STATE.xrayProto.toUpperCase()} accounts yet. Click Create above.</p></div>`;
 
-      $$('[data-cpuuid]', host).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
-      $$('[data-xlinks]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xlinks); if (u) showXrayLinks(u); }; });
-      $$('[data-xtoggle]', host).forEach(b => {
-        b.onclick = async () => {
-          const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
-          try {
-            const target = items.find(x => x.uuid === b.dataset.xtoggle);
-            await api(`/xray/${encodeURIComponent(b.dataset.xtoggle)}`, { method: 'PATCH', body: { status: nextStatus } });
-            toast(`${target ? target.username : 'Xray client'} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
-            const fresh = await api('/xray');
-            items = fresh.items || [];
-            paintXrayCards();
-          } catch (err) { toast(err.message, 'err'); }
-        };
-      });
-      $$('[data-xedit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xedit); if (u) openXrayForm(u.proto, u); }; });
-      $$('[data-xdel]', host).forEach(b => {
-        b.onclick = async () => {
-          const card = b.closest('.acc');
-          try {
-            await api(`/xray/${encodeURIComponent(b.dataset.xdel)}`, { method: 'DELETE' });
-            toast('Xray client removed');
-            await nanoDisintegrate(card);
-            items = items.filter(x => x.uuid !== b.dataset.xdel);
-            paintXrayCards();
-          } catch (err) { toast(err.message, 'err'); }
-        };
-      });
+      if (!isViewer) {
+        $$('[data-cpuuid]', host).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
+        $$('[data-xlinks]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xlinks); if (u) showXrayLinks(u); }; });
+        $$('[data-xtoggle]', host).forEach(b => {
+          b.onclick = async () => {
+            const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
+            try {
+              const target = items.find(x => x.uuid === b.dataset.xtoggle);
+              await api(`/xray/${encodeURIComponent(b.dataset.xtoggle)}`, { method: 'PATCH', body: { status: nextStatus } });
+              toast(`${target ? target.username : 'Xray client'} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
+              const fresh = await api('/xray');
+              items = fresh.items || [];
+              paintXrayCards();
+            } catch (err) { toast(err.message, 'err'); }
+          };
+        });
+        $$('[data-xedit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xedit); if (u) openXrayForm(u.proto, u); }; });
+        $$('[data-xdel]', host).forEach(b => {
+          b.onclick = async () => {
+            const card = b.closest('.acc');
+            try {
+              await api(`/xray/${encodeURIComponent(b.dataset.xdel)}`, { method: 'DELETE' });
+              toast('Xray client removed');
+              await nanoDisintegrate(card);
+              items = items.filter(x => x.uuid !== b.dataset.xdel);
+              paintXrayCards();
+            } catch (err) { toast(err.message, 'err'); }
+          };
+        });
+      }
     };
 
     $$('[data-xp]', $('#xraySeg')).forEach(b => {
@@ -1251,11 +1303,12 @@
   }
 
   function openXrayForm(proto = 'vless', existing = null) {
+    if (STATE.me && STATE.me.role === 'viewer') return;
     const curProto = existing ? existing.proto : proto;
     openSheet(existing ? `Edit ${existing.username} (${curProto.toUpperCase()})` : `Create ${curProto.toUpperCase()} Client`, existing ? 'EDIT XRAY CLIENT' : 'XRAY HOT-PROVISION', `
-      <form class="stack" id="xrayForm">
+      <form class="stack" id="xrayForm" autocomplete="off">
         <div class="row2">
-          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" value="${existing ? esc(existing.username) : ''}" placeholder="Alyan"/></label>
+          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" value="${existing ? esc(existing.username) : ''}" placeholder="Enter username" autocomplete="off"/></label>
           <label class="field"><span>Protocol</span>
             <select name="proto">
               <option value="vless" ${curProto==='vless'?'selected':''}>VLESS</option>
@@ -1302,21 +1355,23 @@
   /* ═════════════════════ 4. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
   async function renderEngine() {
     let engBusy = false;
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'DAEMONS & PORTS',
       'Engine',
       'HAProxy · Nginx · Dropbear · WS-Proxy · Xray · Alyan Guard · Bot · Panel',
-      `<button class="btn sm" id="btnRefreshEng">${ic('refresh')}<span>Refresh</span></button>
+      isViewer ? '' : `
+       <button class="btn sm" id="btnRefreshEng">${ic('refresh')}<span>Refresh</span></button>
        <button class="btn btn-flame sm" id="btnRestartAll">${ic('bolt')}<span>Restart Full Stack</span></button>`
     );
 
     const drawEngine = async () => {
       const { services, ports } = await api('/engine');
-      const pubPorts = ports.filter(p => p.scope === 'public');
-      const locPorts = ports.filter(p => p.scope !== 'public');
+      const pubPorts = (ports || []).filter(p => p.scope === 'public');
+      const locPorts = (ports || []).filter(p => p.scope !== 'public');
 
       $('#view').innerHTML = `
-        <div class="grid g2">
+        <div class="grid ${isViewer ? 'g1' : 'g2'}">
           <section class="mod" style="padding:18px 18px 8px">
             <div class="mod-h">
               <h3>${ic('engine')} System Daemons</h3>
@@ -1330,15 +1385,17 @@
                     <div class="svc-n">${esc(s.name)} <span class="pill ${s.status === 'running' ? 'lit' : 'fire'}">${esc(s.status)}</span></div>
                     <div class="svc-m"><span>${esc(s.desc)}</span><span>mem ${esc(s.mem)}</span><span>up ${esc(s.uptime)}</span></div>
                   </div>
+                  ${isViewer ? '' : `
                   <div class="svc-a">
                     <button class="switch ${s.status === 'running' ? 'on' : ''}" title="${s.status === 'running' ? 'Stop' : 'Start'}" data-svctog="${esc(s.id)}" data-run="${s.status === 'running' ? '1' : '0'}"></button>
                     <button class="icon-btn sm" title="Restart" data-svcrst="${esc(s.id)}">${ic('refresh')}</button>
                     <button class="icon-btn sm" title="Logs" data-svclog="${esc(s.id)}">${ic('terminal')}</button>
-                  </div>
+                  </div>`}
                 </div>`).join('')}
             </div>
           </section>
 
+          ${isViewer ? '' : `
           <section class="mod">
             <div class="mod-h">
               <h3>${ic('globe')} Live Listening TCP Ports</h3>
@@ -1366,38 +1423,42 @@
                 </table>
               </div>
             </div>
-          </section>
+          </section>`}
         </div>`;
 
-      $$('[data-svctog]', $('#view')).forEach(b => {
-        b.onclick = async () => {
-          const act = b.dataset.run === '1' ? 'stop' : 'start';
-          await api(`/service/${b.dataset.svctog}/${act}`, { method: 'POST' });
-          toast(`${b.dataset.svctog}: ${act}`);
-          drawEngine();
-        };
-      });
-      $$('[data-svcrst]', $('#view')).forEach(b => {
-        b.onclick = async () => {
-          await api(`/service/${b.dataset.svcrst}/restart`, { method: 'POST' });
-          toast(`${b.dataset.svcrst}: restarted`);
-          drawEngine();
-        };
-      });
-      $$('[data-svclog]', $('#view')).forEach(b => {
-        b.onclick = async () => {
-          const r = await api(`/service/${b.dataset.svclog}/logs`);
-          openSheet(`${b.dataset.svclog} · Logs`, 'JOURNAL STREAM', `<pre class="term">${esc(r.logs)}</pre>`);
-        };
-      });
+      if (!isViewer) {
+        $$('[data-svctog]', $('#view')).forEach(b => {
+          b.onclick = async () => {
+            const act = b.dataset.run === '1' ? 'stop' : 'start';
+            await api(`/service/${b.dataset.svctog}/${act}`, { method: 'POST' });
+            toast(`${b.dataset.svctog}: ${act}`);
+            drawEngine();
+          };
+        });
+        $$('[data-svcrst]', $('#view')).forEach(b => {
+          b.onclick = async () => {
+            await api(`/service/${b.dataset.svcrst}/restart`, { method: 'POST' });
+            toast(`${b.dataset.svcrst}: restarted`);
+            drawEngine();
+          };
+        });
+        $$('[data-svclog]', $('#view')).forEach(b => {
+          b.onclick = async () => {
+            const r = await api(`/service/${b.dataset.svclog}/logs`);
+            openSheet(`${b.dataset.svclog} · Logs`, 'JOURNAL STREAM', `<pre class="term">${esc(r.logs)}</pre>`);
+          };
+        });
+      }
     };
 
-    $('#btnRefreshEng').onclick = drawEngine;
-    $('#btnRestartAll').onclick = async () => {
-      await api('/service/all/restart', { method: 'POST' });
-      toast('Full tunneling stack restarted cleanly');
-      drawEngine();
-    };
+    if (!isViewer) {
+      const btnRef = $('#btnRefreshEng'); if (btnRef) btnRef.onclick = drawEngine;
+      const btnRst = $('#btnRestartAll'); if (btnRst) btnRst.onclick = async () => {
+        await api('/service/all/restart', { method: 'POST' });
+        toast('Full tunneling stack restarted cleanly');
+        drawEngine();
+      };
+    }
     await drawEngine();
     STATE.timer = setInterval(async () => {
       if (STATE.bay !== 'engine' || document.hidden || engBusy) return;
@@ -1491,6 +1552,7 @@
   async function renderForge() {
     const { cfg } = await api('/auth/me');
     STATE.cfg = cfg; syncHud();
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'SYSTEM CONFIGURATION',
       'Settings',
@@ -1500,28 +1562,30 @@
     $('#view').innerHTML = `
       <div class="grid g2">
         <!-- Domain, SSL & Panel Port -->
-        <section class="mod">
+        <section class="mod ${isViewer ? 'span2' : ''}">
           <div class="mod-h"><h3>${ic('globe')} Domain, SSL &amp; Panel Port</h3><span class="pill lit">SSL valid · ${cfg.ssl_days}d</span></div>
-          <form class="stack" id="domForm">
+          <form class="stack" id="domForm" autocomplete="off">
             <div class="row2">
-              <label class="field"><span>Custom Tunnel Domain</span><input name="domain" required value="${esc(cfg.domain)}"/></label>
-              <label class="field"><span>Web Panel HTTPS Port</span><input name="panel_port" type="number" min="1024" max="65535" required value="${cfg.panel_port}"/></label>
+              <label class="field"><span>Custom Tunnel Domain</span><input name="domain" required value="${esc(cfg.domain)}" ${isViewer ? 'readonly disabled' : ''}/></label>
+              <label class="field"><span>Web Panel HTTPS Port</span><input name="panel_port" type="number" min="1024" max="65535" required value="${cfg.panel_port}" ${isViewer ? 'readonly disabled' : ''}/></label>
             </div>
             <p class="note">Changing domain automatically issues a fresh Let's Encrypt EC-256 certificate, rebuilds the HAProxy PEM bundle, and reloads Nginx + Xray without dropping active sessions.</p>
+            ${isViewer ? '' : `
             <div class="chips">
               <button type="submit" class="btn btn-flame sm">${ic('check')}<span>Apply Domain &amp; Port</span></button>
               <button type="button" class="btn sm" id="btnRenewSsl">${ic('lock')}<span>Issue / Renew SSL</span></button>
-            </div>
+            </div>`}
           </form>
         </section>
 
         <!-- Admin Security & Stack Repair -->
+        ${isViewer ? '' : `
         <section class="mod">
           <div class="mod-h"><h3>${ic('key')} Admin Security &amp; Stack Repair</h3><span class="sub">Password &amp; Wire-Speed Tune</span></div>
-          <form class="stack" id="pwForm">
+          <form class="stack" id="pwForm" autocomplete="off">
             <div class="row2">
-              <label class="field"><span>New Admin Password</span><input name="new_password" type="password" required minlength="6" placeholder="••••••••"/></label>
-              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" required minlength="6" placeholder="••••••••"/></label>
+              <label class="field"><span>New Admin Password</span><input name="new_password" type="password" required minlength="6" placeholder="Enter new password" autocomplete="new-password"/></label>
+              <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" required minlength="6" placeholder="Confirm password" autocomplete="new-password"/></label>
             </div>
             <p class="note">One-click Stack Repair re-applies unthrottled Kernel BBR + FQ pacing, clears any NIC traffic shapers, and syncs HAProxy, Nginx, Dropbear &amp; Xray.</p>
             <div class="chips">
@@ -1529,61 +1593,66 @@
               <button type="button" class="btn sm" id="btnFixStack">${ic('refresh')}<span>Fix &amp; Optimize Stack</span></button>
             </div>
           </form>
-        </section>
+        </section>`}
 
         <!-- SSH Handshake Banner -->
         <section class="mod span2">
           <div class="mod-h"><h3>${ic('terminal')} SSH Handshake Banner</h3><span class="sub">Dropbear + OpenSSH</span></div>
-          <form class="stack" id="bannerForm">
-            <label class="field"><span>HTML / ANSI Banner Markup</span><textarea name="banner">${esc(cfg.banner || '')}</textarea></label>
-            <div><button type="submit" class="btn btn-flame sm">${ic('check')}<span>Save SSH Banner</span></button></div>
+          <form class="stack" id="bannerForm" autocomplete="off">
+            <label class="field"><span>HTML / ANSI Banner Markup</span><textarea name="banner" ${isViewer ? 'readonly disabled' : ''}>${esc(cfg.banner || '')}</textarea></label>
+            ${isViewer ? '' : `<div><button type="submit" class="btn btn-flame sm">${ic('check')}<span>Save SSH Banner</span></button></div>`}
           </form>
         </section>
       </div>`;
 
-    $('#domForm').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = Object.fromEntries(new FormData(e.target).entries());
-      await api('/settings', { method: 'POST', body: { domain: fd.domain, panel_port: +fd.panel_port } });
-      toast('Domain & Panel port updated');
-      renderForge();
-    };
-    $('#btnRenewSsl').onclick = async () => {
-      await api('/settings', { method: 'POST', body: { ssl_renew: true } });
-      toast('SSL certificate renewed & HAProxy bundle synced');
-      renderForge();
-    };
-    $('#bannerForm').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = Object.fromEntries(new FormData(e.target).entries());
-      await api('/settings', { method: 'POST', body: { banner: fd.banner } });
-      toast('SSH handshake banner saved');
-    };
-    $('#pwForm').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = Object.fromEntries(new FormData(e.target).entries());
-      if (fd.new_password !== fd.confirm_password) { toast('Passwords do not match', 'err'); return; }
-      await api('/settings', { method: 'POST', body: { new_password: fd.new_password } });
-      e.target.reset();
-      toast('Admin password updated');
-    };
-    $('#btnFixStack').onclick = async () => {
-      await api('/settings', { method: 'POST', body: { maint: 'fix_ws_ssl_stack' } });
-      await api('/service/all/restart', { method: 'POST' });
-      toast('Wire-Speed BBR+FQ + SSH-WS + SSL + Xray stack optimized & restarted');
-    };
+    if (!isViewer) {
+      $('#domForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = Object.fromEntries(new FormData(e.target).entries());
+        await api('/settings', { method: 'POST', body: { domain: fd.domain, panel_port: +fd.panel_port } });
+        toast('Domain & Panel port updated');
+        renderForge();
+      };
+      $('#btnRenewSsl').onclick = async () => {
+        await api('/settings', { method: 'POST', body: { ssl_renew: true } });
+        toast('SSL certificate renewed & HAProxy bundle synced');
+        renderForge();
+      };
+      $('#bannerForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = Object.fromEntries(new FormData(e.target).entries());
+        await api('/settings', { method: 'POST', body: { banner: fd.banner } });
+        toast('SSH handshake banner saved');
+      };
+      $('#pwForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = Object.fromEntries(new FormData(e.target).entries());
+        if (fd.new_password !== fd.confirm_password) { toast('Passwords do not match', 'err'); return; }
+        await api('/settings', { method: 'POST', body: { new_password: fd.new_password } });
+        e.target.reset();
+        toast('Admin password updated');
+      };
+      $('#btnFixStack').onclick = async () => {
+        await api('/settings', { method: 'POST', body: { maint: 'fix_ws_ssl_stack' } });
+        await api('/service/all/restart', { method: 'POST' });
+        toast('Wire-Speed BBR+FQ + SSH-WS + SSL + Xray stack optimized & restarted');
+      };
+    }
   }
 
   /* ═════════════════════ 7. ADMINS (Super Admin / Reseller / Viewer RBAC) ═════════════════════ */
   async function renderAdmins() {
     const { items } = await api('/admins');
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'ROLE-BASED ACCESS CONTROL',
       'Admins',
       'Manage Super Admins, Reseller Admins with account quotas & read-only Viewers',
-      `<button class="btn btn-flame sm" id="btnNewAdmin">${ic('plus')}<span>Add Panel Admin</span></button>`
+      isViewer ? '' : `<button class="btn btn-flame sm" id="btnNewAdmin">${ic('plus')}<span>Add Panel Admin</span></button>`
     );
-    $('#btnNewAdmin').onclick = openAdminForm;
+    if (!isViewer) {
+      $('#btnNewAdmin').onclick = openAdminForm;
+    }
 
     $('#view').innerHTML = `
       <div class="cards">
@@ -1602,30 +1671,33 @@
               <div class="st"><span>SCOPE</span><b>${esc(a.scope.toUpperCase())}</b></div>
             </div>
             <div class="acc-act">
-              ${a.username === 'admin' ? `<span class="pill lit">Primary Root Owner</span>` : `<button class="btn btn-danger sm" data-adel="${esc(a.username)}">${ic('trash')}<span>Revoke</span></button>`}
+              ${isViewer ? '' : (a.username === 'admin' ? `<span class="pill lit">Primary Root Owner</span>` : `<button class="btn btn-danger sm" data-adel="${esc(a.username)}">${ic('trash')}<span>Revoke</span></button>`)}
             </div>
           </article>`).join('')}
       </div>`;
 
-    $$('[data-adel]', $('#view')).forEach(b => {
-      b.onclick = async () => {
-        const card = b.closest('.acc');
-        try {
-          await api(`/admins/${encodeURIComponent(b.dataset.adel)}`, { method: 'DELETE' });
-          toast(`Admin ${b.dataset.adel} removed`);
-          await nanoDisintegrate(card);
-          renderAdmins();
-        } catch (err) { toast(err.message, 'err'); }
-      };
-    });
+    if (!isViewer) {
+      $$('[data-adel]', $('#view')).forEach(b => {
+        b.onclick = async () => {
+          const card = b.closest('.acc');
+          try {
+            await api(`/admins/${encodeURIComponent(b.dataset.adel)}`, { method: 'DELETE' });
+            toast(`Admin ${b.dataset.adel} removed`);
+            await nanoDisintegrate(card);
+            renderAdmins();
+          } catch (err) { toast(err.message, 'err'); }
+        };
+      });
+    }
   }
 
   function openAdminForm() {
+    if (STATE.me && STATE.me.role === 'viewer') return;
     openSheet('Create Panel Admin / Reseller', 'ADMIN RBAC', `
-      <form class="stack" id="admForm">
+      <form class="stack" id="admForm" autocomplete="off">
         <div class="row2">
-          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{3,24}" placeholder="reseller2"/></label>
-          <label class="field"><span>Password</span><input name="password" type="password" required minlength="6" placeholder="••••••••"/></label>
+          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{3,24}" placeholder="Enter username" autocomplete="off"/></label>
+          <label class="field"><span>Password</span><input name="password" type="password" required minlength="6" placeholder="Enter password" autocomplete="new-password"/></label>
         </div>
         <div class="row3">
           <label class="field"><span>Role</span>
@@ -1776,6 +1848,7 @@
 
   /* ═════════════════════ FLAME LAUNCHER & COMMAND PALETTE ═════════════════════ */
   function openQuickSheet() {
+    if (STATE.me && STATE.me.role === 'viewer') return;
     openSheet('Flame Launcher', 'QUICK PROVISION', `
       <div class="qc-grid">
         <button class="qc" data-qa="ssh">${ic('tunnel')}<b>New SSH Account</b><span>Direct · SSL · WS /alyan</span></button>
@@ -1795,12 +1868,15 @@
 
   function openPalette() {
     const wrap = $('#paletteWrap'), inp = $('#paletteInput'), ul = $('#paletteList');
+    const isViewer = STATE.me && STATE.me.role === 'viewer';
     const cmds = [
       { label: 'Go to Core', icon: 'core', run: () => go('core'), key: 'G C' },
-      { label: 'Create SSH Account (/alyan)', icon: 'plus', run: () => { go('tunnels'); setTimeout(() => openSshForm(), 40); }, key: 'N S' },
-      { label: 'Create VLESS Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vless'; go('xray'); setTimeout(() => openXrayForm('vless'), 40); }, key: 'N V' },
-      { label: 'Create VMess Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vmess'; go('xray'); setTimeout(() => openXrayForm('vmess'), 40); }, key: 'N M' },
-      { label: 'Create Trojan Client', icon: 'lock', run: () => { STATE.xrayProto = 'trojan'; go('xray'); setTimeout(() => openXrayForm('trojan'), 40); }, key: 'N T' },
+      ...(isViewer ? [] : [
+        { label: 'Create SSH Account (/alyan)', icon: 'plus', run: () => { go('tunnels'); setTimeout(() => openSshForm(), 40); }, key: 'N S' },
+        { label: 'Create VLESS Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vless'; go('xray'); setTimeout(() => openXrayForm('vless'), 40); }, key: 'N V' },
+        { label: 'Create VMess Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vmess'; go('xray'); setTimeout(() => openXrayForm('vmess'), 40); }, key: 'N M' },
+        { label: 'Create Trojan Client', icon: 'lock', run: () => { STATE.xrayProto = 'trojan'; go('xray'); setTimeout(() => openXrayForm('trojan'), 40); }, key: 'N T' }
+      ]),
       { label: 'Open SSH Accounts', icon: 'tunnel', run: () => go('tunnels') },
       { label: 'Open Xray', icon: 'bolt', run: () => go('xray') },
       { label: 'Open Engine (Services & Ports)', icon: 'engine', run: () => go('engine') },

@@ -983,18 +983,18 @@ def validate_username(username: str) -> str:
     return u
 
 
-def format_ssh_row(row: sqlite3.Row, ssh_live: dict) -> dict:
+def format_ssh_row(row: sqlite3.Row, ssh_live: dict, is_viewer: bool = False) -> dict:
     uname = row["username"]
     is_dis = row["status"] == "disabled"
     live = ssh_live.get(uname, {})
     return {
         "username": uname,
-        "password": row["password"],
+        "password": "••••" if is_viewer else row["password"],
         "used_bytes": int(row["used_bytes"]),
         "gb_limit": float(row["gb_limit"]),
-        "ip_limit": int(row["ip_limit"]),
-        "online": 0 if is_dis else int(live.get("online", 0)),
-        "ips": [] if is_dis else list(live.get("ips", [])),
+        "ip_limit": 0 if is_viewer else int(row["ip_limit"]),
+        "online": 0 if (is_dis or is_viewer) else int(live.get("online", 0)),
+        "ips": [] if (is_dis or is_viewer) else list(live.get("ips", [])),
         "expiry": row["expiry"],
         "status": row["status"],
         "owner": row["owner"],
@@ -1004,8 +1004,9 @@ def format_ssh_row(row: sqlite3.Row, ssh_live: dict) -> dict:
 def ssh_list(conn: sqlite3.Connection, actor_info: dict) -> dict:
     snap = read_live_snapshot()
     ssh_live = snap.get("ssh_live", {})
+    is_viewer = actor_info.get("role") == "viewer"
     rows = conn.execute("SELECT * FROM ssh_users ORDER BY rowid DESC").fetchall()
-    items = [format_ssh_row(r, ssh_live) for r in rows if can_access_owner(actor_info, r["owner"])]
+    items = [format_ssh_row(r, ssh_live, is_viewer) for r in rows if can_access_owner(actor_info, r["owner"])]
     return {"items": items, "cfg": build_cfg_dict(conn)}
 
 
@@ -1124,18 +1125,18 @@ def ssh_del(conn: sqlite3.Connection, actor_info: dict, username: str, ip: str =
 
 
 # ─── Xray Client Management (VLESS · VMess · Trojan) ─────────────────────────
-def format_xray_row(row: sqlite3.Row, xray_live: dict) -> dict:
+def format_xray_row(row: sqlite3.Row, xray_live: dict, is_viewer: bool = False) -> dict:
     live = xray_live.get(row["uuid"], {})
     is_dis = row["status"] == "disabled"
     return {
         "username": row["username"],
         "proto": row["proto"],
-        "uuid": row["uuid"],
+        "uuid": "••••••••-••••-••••-••••-••••••••••••" if is_viewer else row["uuid"],
         "used_bytes": int(row["used_bytes"]),
         "gb_limit": float(row["gb_limit"]),
-        "ip_limit": int(row["ip_limit"]),
-        "online": 0 if is_dis else int(live.get("online", 0)),
-        "ips": [] if is_dis else list(live.get("ips", [])),
+        "ip_limit": 0 if is_viewer else int(row["ip_limit"]),
+        "online": 0 if (is_dis or is_viewer) else int(live.get("online", 0)),
+        "ips": [] if (is_dis or is_viewer) else list(live.get("ips", [])),
         "expiry": row["expiry"],
         "status": row["status"],
         "owner": row["owner"],
@@ -1145,8 +1146,9 @@ def format_xray_row(row: sqlite3.Row, xray_live: dict) -> dict:
 def xray_list(conn: sqlite3.Connection, actor_info: dict) -> dict:
     snap = read_live_snapshot()
     xray_live = snap.get("xray_live", {})
+    is_viewer = actor_info.get("role") == "viewer"
     rows = conn.execute("SELECT * FROM xray_users ORDER BY rowid DESC").fetchall()
-    items = [format_xray_row(r, xray_live) for r in rows if can_access_owner(actor_info, r["owner"])]
+    items = [format_xray_row(r, xray_live, is_viewer) for r in rows if can_access_owner(actor_info, r["owner"])]
     return {"items": items, "cfg": build_cfg_dict(conn)}
 
 
@@ -1504,8 +1506,9 @@ def admin_me(conn: sqlite3.Connection, username: str) -> dict:
 def admin_list(conn: sqlite3.Connection, actor_info: dict) -> dict:
     rows = conn.execute("SELECT * FROM admins ORDER BY rowid ASC").fetchall()
     items = []
+    role = actor_info.get("role")
     for r in rows:
-        if actor_info.get("role") != "super" and r["username"] != actor_info.get("username"):
+        if role not in ("super", "viewer") and r["username"] != actor_info.get("username"):
             continue
         uname = r["username"]
         c_ssh = conn.execute("SELECT COUNT(*) AS c FROM ssh_users WHERE owner = ?", (uname,)).fetchone()["c"]
@@ -1690,7 +1693,8 @@ def main():
             out = build_overview_payload(conn, actor_info)
         elif args.cmd == "engine":
             prt = int(get_setting(conn, "panel_port", "8443"))
-            out = {"services": collect_services(), "ports": collect_listening_ports(prt)}
+            is_viewer = actor_info.get("role") == "viewer"
+            out = {"services": collect_services(), "ports": [] if is_viewer else collect_listening_ports(prt)}
         elif args.cmd == "xray-sync":
             sync_xray_config(conn, reload_service=True)
             out = {"ok": True}
