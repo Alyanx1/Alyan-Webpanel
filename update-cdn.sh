@@ -56,14 +56,14 @@ do_rollback() {
   [[ -f "${BACKUP_DIR}/alyan-guard.py" ]] && cp -f "${BACKUP_DIR}/alyan-guard.py" "${INSTALL_DIR}/services/guard/alyan-guard.py"
   [[ -f "${BACKUP_DIR}/alyan-ctl" ]] && cp -f "${BACKUP_DIR}/alyan-ctl" "${INSTALL_DIR}/core/alyan-ctl"
   [[ -f "${BACKUP_DIR}/99-alyan-turbo.conf" ]] && cp -f "${BACKUP_DIR}/99-alyan-turbo.conf" "/etc/sysctl.d/99-alyan-turbo.conf"
+  [[ -f "${BACKUP_DIR}/haproxy.cfg" ]] && cp -f "${BACKUP_DIR}/haproxy.cfg" "/etc/haproxy/haproxy.cfg"
+  [[ -f "${BACKUP_DIR}/alyan-router.conf" ]] && cp -f "${BACKUP_DIR}/alyan-router.conf" "/etc/nginx/conf.d/alyan-router.conf"
+  [[ -f "${BACKUP_DIR}/config.json" ]] && cp -f "${BACKUP_DIR}/config.json" "/usr/local/etc/xray/config.json"
 
   chmod +x "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/services/wsd/alyan-wsd.py" "${INSTALL_DIR}/services/guard/alyan-guard.py"
 
   echo -e "  ${C_CYN}•${C_RST} Re-applying original kernel sysctl..."
   sysctl --system >/dev/null 2>&1 || true
-
-  echo -e "  ${C_CYN}•${C_RST} Re-rendering configuration files..."
-  python3 "${INSTALL_DIR}/core/alyan-ctl" render >/dev/null 2>&1 || true
 
   echo -e "  ${C_CYN}•${C_RST} Restarting services..."
   systemctl daemon-reload
@@ -142,7 +142,7 @@ frontend fe_http_80
 
     acl is_raw_ssh    payload(0,4) -m bin 5353482d
     acl is_acme       payload(0,256) -m sub /.well-known/acme-challenge/
-    acl is_xray_ws    payload(0,256) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
+    acl is_xray_ws    payload(0,256) -m sub /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
     acl is_http_80    payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
     tcp-request content accept if is_raw_ssh or is_acme or is_xray_ws or is_http_80
@@ -177,7 +177,7 @@ frontend fe_tls_terminator
 
     acl is_alpn_h2    ssl_fc_alpn -i h2
     acl is_ssh_ssl    payload(0,4) -m bin 5353482d
-    acl is_xray_ws    payload(0,256) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
+    acl is_xray_ws    payload(0,256) -m sub /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp
     acl is_http_req   payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
     tcp-request content accept if is_alpn_h2 or is_ssh_ssl or is_xray_ws or is_http_req
@@ -434,7 +434,8 @@ async def pipe_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
                 break
             stat_dict[key] += len(chunk)
             writer.write(chunk)
-            await writer.drain()
+            if writer.transport and writer.transport.get_write_buffer_size() > 65536:
+                await writer.drain()
     except (ConnectionError, asyncio.CancelledError, OSError):
         pass
     finally:
@@ -594,7 +595,6 @@ EOF
 
 apply_guard_fix() {
   echo -e "  ${C_CYN}•${C_RST} Applying Multi-CDN Edge Strike Protection in alyan-guard..."
-  # Patch device_key_for_ip in alyan-guard.py using Python for exact clean replacement
   python3 - <<'PYPATCH'
 import re
 from pathlib import Path
@@ -602,7 +602,6 @@ from pathlib import Path
 p = Path("/opt/alyan/services/guard/alyan-guard.py")
 txt = p.read_text(encoding="utf-8")
 
-# Ensure BUNNY_EDGE_PREFIXES and AWS_CF_PREFIXES are defined
 addon = '''BUNNY_EDGE_PREFIXES = (
     "185.180.", "169.150.", "185.93.", "217.156.", "89.187.",
     "138.199.", "146.70.", "194.26.", "147.78.", "84.17.",
@@ -623,7 +622,6 @@ AWS_CF_PREFIXES = (
 if "BUNNY_EDGE_PREFIXES" not in txt:
     txt = txt.replace("CF_EDGE_NETS = [", addon + "\nCF_EDGE_NETS = [")
 
-# Replace device_key_for_ip implementation
 old_pattern = re.compile(r"def device_key_for_ip\(ip_str: str\) -> str:.*?(?=\ndef read_recent_nginx_xray_ips)", re.DOTALL)
 
 new_func = '''def device_key_for_ip(ip_str: str) -> str:
@@ -891,7 +889,6 @@ EOF
 
 apply_kernel_fix() {
   echo -e "  ${C_CYN}•${C_RST} Applying BBR + FQ Pacing & Anti-Throttling Kernel Tuning..."
-  # Patch alyan-ctl apply_kernel_network_tuning
   sed -i 's/"net.ipv4.tcp_notsent_lowat = 16384"/"net.ipv4.tcp_notsent_lowat = 4294967295"/g' "${INSTALL_DIR}/core/alyan-ctl"
   sed -i 's/"net.ipv4.tcp_mtu_probing = 1"/"net.ipv4.tcp_mtu_probing = 0"/g' "${INSTALL_DIR}/core/alyan-ctl"
   sed -i 's/"net.core.rmem_max = 33554432"/"net.core.rmem_max = 67108864"/g' "${INSTALL_DIR}/core/alyan-ctl"
@@ -932,8 +929,65 @@ EOF
 }
 
 compile_and_reload() {
-  echo -e "  ${C_CYN}•${C_RST} Compiling live configs via alyan-ctl..."
-  python3 "${INSTALL_DIR}/core/alyan-ctl" render >/dev/null 2>&1 || true
+  echo -e "  ${C_CYN}•${C_RST} Compiling live configs (HAProxy, Nginx, Xray) from database..."
+  python3 - <<'PYRENDER'
+import sys
+import sqlite3
+from pathlib import Path
+
+db_path = Path("/var/lib/alyan/alyan.db")
+if not db_path.exists():
+    sys.exit(0)
+
+conn = sqlite3.connect(str(db_path))
+conn.row_factory = sqlite3.Row
+
+sys.path.insert(0, "/opt/alyan/core")
+try:
+    import importlib
+    ctl = importlib.import_module("alyan-ctl")
+    ctl.render_all_configs(conn, reload_daemons=False)
+    print("  ✓ render_all_configs executed successfully.")
+except Exception as e:
+    print(f"  ✖ Notice in render_all_configs: {e}", file=sys.stderr)
+finally:
+    conn.close()
+PYRENDER
+
+  # Direct template compile fallback to guarantee /etc/haproxy/haproxy.cfg and /etc/nginx/ are written
+  python3 - <<'PYDIRECT'
+import sqlite3
+from pathlib import Path
+
+domain = "localhost"
+db_path = Path("/var/lib/alyan/alyan.db")
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT value FROM settings WHERE key = 'domain'").fetchone()
+        if row and row["value"]:
+            domain = row["value"]
+        conn.close()
+    except Exception:
+        pass
+
+hap_tpl = Path("/opt/alyan/templates/haproxy.cfg.tpl")
+if hap_tpl.exists():
+    Path("/etc/haproxy").mkdir(parents=True, exist_ok=True)
+    Path("/etc/haproxy/haproxy.cfg").write_text(
+        hap_tpl.read_text(encoding="utf-8").replace("{{DOMAIN}}", domain),
+        encoding="utf-8"
+    )
+
+nr_tpl = Path("/opt/alyan/templates/nginx-router.conf.tpl")
+if nr_tpl.exists():
+    Path("/etc/nginx/conf.d").mkdir(parents=True, exist_ok=True)
+    Path("/etc/nginx/conf.d/alyan-router.conf").write_text(
+        nr_tpl.read_text(encoding="utf-8").replace("{{DOMAIN}}", domain),
+        encoding="utf-8"
+    )
+PYDIRECT
 
   echo -e "  ${C_CYN}•${C_RST} Restarting HAProxy, Nginx, Xray, WS-Bridge & Guard..."
   systemctl daemon-reload
