@@ -72,8 +72,8 @@ bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/i
 - **Custom HTTPS Port (`https://<domain>:<port>`):**
   - Nginx TLS 1.3 + HTTP/2 reverse proxy → FastAPI Uvicorn (`127.0.0.1:7700`) with real-time 2s live telemetry
 - **Enforcement & Wire-Speed Engine:**
-  - **Kernel BBR + `fq` Packet Pacing (`/etc/sysctl.d/99-alyan-turbo.conf`):** Unthrottled wire-speed throughput, `tcp_slow_start_after_idle=0`, `tcp_notsent_lowat=16384`, and 32 MB socket buffers for stable ping and zero mid-stream speed drops.
-  - **`alyan-guard.service`:** Real-time GB quota tracking, expiry auto-lock, accurate subscriber Real-IP detection (`/64` IPv6 prefix grouping), sub-2-second disconnect offline detection, and strict `ip_limit` auto-disable across SSH, Dropbear, WS `/alyan`, and Xray.
+  - **Kernel BBR + `fq` Packet Pacing (`/etc/sysctl.d/99-alyan-turbo.conf`):** Unthrottled wire-speed throughput, 64 MB socket buffers, `tcp_nodelay`, and optimized CDN bufferbloat mitigation for stable ping.
+  - **`alyan-guard.service`:** Real-time GB quota tracking, expiry auto-lock, session-based concurrent user limiter, live active session counting, sub-2-second disconnect offline detection, and strict multi-login auto-disable across SSH, Dropbear, WS `/alyan`, and Xray.
   - **`alyan-bot.service`:** Full remote Telegram Bot with inline keyboards & step-by-step account wizards.
 
 ---

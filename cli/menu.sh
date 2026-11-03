@@ -176,7 +176,7 @@ opt_manage_users() {
         read -rp "  Password       : " p </dev/tty
         read -rp "  Validity Days [30] : " d </dev/tty; d="${d:-30}"
         read -rp "  GB Quota (0=∞) [0] : " g </dev/tty; g="${g:-0}"
-        read -rp "  IP Limit (0=∞) [2] : " ipm </dev/tty; ipm="${ipm:-2}"
+        read -rp "  User Limit (0=∞) [2] : " ipm </dev/tty; ipm="${ipm:-2}"
         res=$($CTL --actor cli ssh-add --username "$u" --password "$p" --days "$d" --gb-limit "$g" --ip-limit "$ipm" 2>&1)
         if echo "$res" | jq -e '.item' >/dev/null 2>&1; then
           dom=$(echo "$res" | jq -r '.cfg.domain')
@@ -193,7 +193,7 @@ opt_manage_users() {
       2)
         res=$($CTL --actor cli ssh-list)
         echo ""
-        printf "  ${C_AMB}%-16s %-10s %-12s %-14s %-8s %-10s${C_RST}\n" "USERNAME" "STATUS" "EXPIRY" "USED / QUOTA" "IP CAP" "ONLINE"
+        printf "  ${C_AMB}%-16s %-10s %-12s %-14s %-8s %-10s${C_RST}\n" "USERNAME" "STATUS" "EXPIRY" "USED / QUOTA" "USER CAP" "ONLINE"
         echo "$res" | jq -r '.items[] | "\(.username)|\(.status)|\(.expiry)|\((.used_bytes/1073741824*100|round)/100)G/\(if .gb_limit>0 then (.gb_limit|tostring)+"G" else "inf" end)|\(if .ip_limit>0 then (.ip_limit|tostring) else "inf" end)|\(.online)"' | \
         while IFS='|' read -r un st ex qt ic on; do
           printf "  %-16s %-10s %-12s %-14s %-8s %-10s\n" "$un" "$st" "$ex" "$qt" "$ic" "$on"
@@ -203,7 +203,7 @@ opt_manage_users() {
         read -rp "  SSH Username to edit : " u </dev/tty
         read -rp "  New Days [30]        : " d </dev/tty; d="${d:-30}"
         read -rp "  GB Limit (0=∞) [0]   : " g </dev/tty; g="${g:-0}"
-        read -rp "  IP Limit (0=∞) [2]   : " ipm </dev/tty; ipm="${ipm:-2}"
+        read -rp "  User Limit (0=∞) [2]   : " ipm </dev/tty; ipm="${ipm:-2}"
         read -rp "  Reset Used Quota? [y/N]: " rq </dev/tty
         rj="false"; [[ "${rq,,}" == "y" ]] && rj="true"
         payload=$(jq -nc --argjson d "$d" --argjson g "$g" --argjson i "$ipm" --argjson r "$rj" '{days:$d,gb_limit:$g,ip_limit:$i,reset_quota:$r}')
@@ -227,7 +227,7 @@ opt_manage_users() {
         read -rp "  Client Username : " u </dev/tty
         read -rp "  Validity Days [30]: " d </dev/tty; d="${d:-30}"
         read -rp "  GB Limit (0=∞) [0]: " g </dev/tty; g="${g:-0}"
-        read -rp "  IP Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
+        read -rp "  User Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
         res=$($CTL --actor cli xray-add --username "$u" --proto "$pr" --days "$d" --gb-limit "$g" --ip-limit "$ipm" 2>&1)
         if echo "$res" | jq -e '.item' >/dev/null 2>&1; then
           uid=$(echo "$res" | jq -r '.item.uuid')
@@ -259,7 +259,7 @@ opt_manage_users() {
         read -rp "  Enter Xray Client UUID to edit: " uu </dev/tty
         read -rp "  New Days [30]     : " d </dev/tty; d="${d:-30}"
         read -rp "  GB Limit (0=∞) [0]: " g </dev/tty; g="${g:-0}"
-        read -rp "  IP Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
+        read -rp "  User Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
         payload=$(jq -nc --argjson d "$d" --argjson g "$g" --argjson i "$ipm" '{days:$d,gb_limit:$g,ip_limit:$i}')
         res=$($CTL --actor cli xray-edit --uuid "$uu" --json "$payload" 2>&1)
         echo "$res" | jq -e '.item' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Xray client updated!${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"

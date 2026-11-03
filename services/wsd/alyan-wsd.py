@@ -262,23 +262,41 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
                 except asyncio.TimeoutError:
                     break
 
-        # Unwrap CDN client IP headers ONLY if TCP connection came from Cloudflare / loopback
-        if is_trusted_cdn(real_ip) and b"\r\n" in payload and not payload.startswith(b"SSH-"):
+        # Extract Real Visitor/SIM Client IP (Option 1) & Custom Target Headers
+        if b"\r\n" in payload and not payload.startswith(b"SSH-"):
             hdr_text = payload.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
             hdr_map = {}
             for line in hdr_text.splitlines()[1:]:
                 if ":" in line:
                     k, v = line.split(":", 1)
                     hdr_map[k.strip().lower()] = v.strip()
-            for hk in ("cloudfront-viewer-address", "cf-connecting-ip", "true-client-ip", "x-forwarded-for", "x-real-ip"):
+
+            target_cand = None
+            # 1. Custom injector headers (if passed)
+            for hk in ("x-target", "x-edge-ip", "x-real-host", "x-forwarded-host", "x-host"):
                 if hk in hdr_map:
                     raw_val = hdr_map[hk]
                     if ":" in raw_val and not raw_val.startswith("["):
                         raw_val = raw_val.split(":", 1)[0]
-                    cand = normalize_ip(raw_val.split(",")[0])
+                    cand = normalize_ip(raw_val.split(",")[0].strip())
                     if cand and cand not in ("127.0.0.1", "::1"):
-                        real_ip = cand
+                        target_cand = cand
                         break
+
+            # 2. Real Visitor / SIM Client IP from Cloudflare, CloudFront, BunnyCDN, etc.
+            if not target_cand and (is_trusted_cdn(real_ip) or p_ip):
+                for hk in ("cf-connecting-ip", "cloudfront-viewer-address", "true-client-ip", "b-cdn-viewer-address", "x-forwarded-for", "x-real-ip"):
+                    if hk in hdr_map:
+                        raw_val = hdr_map[hk]
+                        if ":" in raw_val and not raw_val.startswith("["):
+                            raw_val = raw_val.split(":", 1)[0]
+                        cand = normalize_ip(raw_val.split(",")[0].strip())
+                        if cand and cand not in ("127.0.0.1", "::1"):
+                            target_cand = cand
+                            break
+
+            if target_cand:
+                real_ip = target_cand
 
         needs_101, tail = strip_ws_headers(payload)
         if needs_101:

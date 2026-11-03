@@ -573,7 +573,7 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
 
         if real_ip and real_ip != "127.0.0.1":
             sessions_by_user[username].append(
-                {"pid": target_pid, "ip": real_ip, "dev": device_key_for_ip(real_ip)}
+                {"pid": target_pid, "ip": real_ip, "dev": str(real_ip)}
             )
 
     for port, info in wsd_map.items():
@@ -751,9 +751,8 @@ def poll_xray_stats_and_ips(
             best_ip = h2c_ips[0]
 
         if best_ip:
-            dev_k = device_key_for_ip(best_ip)
+            dev_k = f"{best_ip}:{len(dev_map)}" if best_ip in dev_map else best_ip
             dev_map[dev_k] = {"ip": best_ip, "ts": now_ts}
-            # Strictly limit number of recorded devices to active sockets count (1 user = 1 IP)
             max_devs = max(1, active_sockets)
             if len(dev_map) > max_devs:
                 sorted_keys = sorted(dev_map.keys(), key=lambda k: dev_map[k]["ts"], reverse=True)
@@ -765,7 +764,7 @@ def poll_xray_stats_and_ips(
             dev_map.pop(stale_k, None)
 
         ips_by_uuid[uid] = sorted({v["ip"] for v in dev_map.values()})
-        dev_count_by_uuid[uid] = len(ips_by_uuid[uid])
+        dev_count_by_uuid[uid] = max(len(ips_by_uuid[uid]), len(dev_map))
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 
@@ -830,9 +829,9 @@ def enforce_cycle():
                 continue
 
             gb_lim = float(r["gb_limit"] or 0)
-            ip_lim = int(r["ip_limit"] or 0)
+            user_lim = int(r["ip_limit"] or 0)
             conns = ssh_sessions.get(uname, [])
-            uniq_devs = sorted({s["dev"] for s in conns if s.get("dev")})
+            session_count = len(conns)
             uniq_ips = sorted({s["ip"] for s in conns if s.get("ip")})
 
             reason = None
@@ -840,17 +839,17 @@ def enforce_cycle():
                 reason = f"SSH user `{uname}` expired ({r['expiry']})"
             elif gb_lim > 0 and used >= int(gb_lim * 1073741824):
                 reason = f"SSH user `{uname}` reached {gb_lim} GB quota"
-            elif ip_lim > 0 and len(uniq_devs) > ip_lim:
+            elif user_lim > 0 and session_count > user_lim:
                 SSH_IP_STRIKES[uname] = SSH_IP_STRIKES.get(uname, 0) + 1
                 if SSH_IP_STRIKES[uname] >= 2:
-                    reason = f"SSH user `{uname}` exceeded IP limit ({len(uniq_ips)}/{ip_lim} IPs) — auto-disabled"
+                    reason = f"SSH user `{uname}` exceeded user limit ({session_count}/{user_lim} Users) — auto-disabled"
                 else:
-                    # Immediately terminate excess device sessions on strike 1
-                    allowed_devs = set(uniq_devs[:ip_lim])
-                    for s in conns:
-                        if s["dev"] not in allowed_devs and s.get("pid"):
+                    # Strike 1: Immediately terminate excess user sessions beyond user_lim
+                    excess = conns[user_lim:]
+                    for s in excess:
+                        if s.get("pid"):
                             subprocess.run(["kill", "-9", str(s["pid"])], stderr=subprocess.DEVNULL)
-                    ssh_sessions[uname] = [s for s in conns if s["dev"] in allowed_devs]
+                    ssh_sessions[uname] = conns[:user_lim]
             else:
                 SSH_IP_STRIKES.pop(uname, None)
 
@@ -886,19 +885,19 @@ def enforce_cycle():
                 continue
 
             gb_lim = float(r["gb_limit"] or 0)
-            ip_lim = int(r["ip_limit"] or 0)
+            user_lim = int(r["ip_limit"] or 0)
             cur_ips = xray_ips.get(uuid, [])
-            fresh_devs = xray_fresh_devs.get(uuid, 0)
+            fresh_sess = xray_fresh_devs.get(uuid, 0)
 
             reason = None
             if r["expiry"] and r["expiry"] < today:
                 reason = f"Xray client `{uname}` ({r['proto'].upper()}) expired"
             elif gb_lim > 0 and used >= int(gb_lim * 1073741824):
                 reason = f"Xray client `{uname}` ({r['proto'].upper()}) reached {gb_lim} GB quota"
-            elif ip_lim > 0 and fresh_devs > ip_lim and len(cur_ips) > ip_lim:
+            elif user_lim > 0 and fresh_sess > user_lim:
                 XRAY_IP_STRIKES[uuid] = XRAY_IP_STRIKES.get(uuid, 0) + 1
                 if XRAY_IP_STRIKES[uuid] >= 3:
-                    reason = f"Xray client `{uname}` ({r['proto'].upper()}) exceeded IP limit ({len(cur_ips)}/{ip_lim} IPs) — auto-disabled"
+                    reason = f"Xray client `{uname}` ({r['proto'].upper()}) exceeded user limit ({fresh_sess}/{user_lim} Users) — auto-disabled"
             else:
                 XRAY_IP_STRIKES.pop(uuid, None)
 
@@ -937,14 +936,18 @@ def enforce_cycle():
     ssh_live = {}
     for uname, conns in ssh_sessions.items():
         ips = sorted({c["ip"] for c in conns if c.get("ip")})
-        ssh_live[uname] = {"online": len(ips) if ips else len(conns), "ips": ips}
+        ssh_live[uname] = {"online": len(conns), "ips": ips}
 
     xray_live = {}
     for r in xray_rows:
         uid = r["uuid"]
         ips = xray_ips.get(uid, [])
-        is_online = len(ips) if ips else (1 if int(xray_deltas.get(uid, 0)) > 0 else 0)
-        xray_live[uid] = {"online": is_online, "ips": ips}
+        user_sess_cnt = xray_fresh_devs.get(uid, 0)
+        if user_sess_cnt == 0 and ips:
+            user_sess_cnt = len(ips)
+        if user_sess_cnt == 0 and int(xray_deltas.get(uid, 0)) > 0:
+            user_sess_cnt = 1
+        xray_live[uid] = {"online": user_sess_cnt, "ips": ips}
 
     snapshot = {
         "updated_at": int(time.time()),

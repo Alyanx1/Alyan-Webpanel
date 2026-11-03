@@ -922,6 +922,18 @@
     STATE.cfg = initData.cfg; syncHud();
 
     const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, ip })));
+    const getLiveUsersTotal = () => items.reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
+    const getLiveUsersList = () => items
+      .filter(u => u.status !== 'disabled' && (u.online > 0 || (u.ips && u.ips.length > 0)))
+      .map(u => ({
+        user: u.username,
+        online: u.online || (u.ips || []).length || 0,
+        limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
+      }));
+
+    const sshUsersSheetHtml = (usersList) => usersList.length
+      ? `<div class="tbl-wrap"><table><thead><tr><th>Account</th><th>Live Users (Active Sessions)</th><th>User Limit</th></tr></thead><tbody>${usersList.map(r => `<tr><td><b>${esc(r.user)}</b></td><td><span class="pill lit"><i class="dot lit"></i>${r.online} Active</span></td><td>${r.limit}</td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty"><p>No active SSH user sessions right now.</p></div>`;
 
     setBayHead(
       'SSH · WS · SSL',
@@ -929,11 +941,13 @@
       `Direct (22, 109, 143) · SSL (443) · WebSocket (80/443 → ${STATE.cfg.ws_path || '/alyan'})`,
       isViewer ? '' : `
        <button class="btn sm" id="btnLiveIps">${ic('wifi')}<span id="btnLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
+       <button class="btn sm" id="btnLiveUsers">${ic('user')}<span id="btnLiveUsersTxt">Live Users (${getLiveUsersTotal()})</span></button>
        <button class="btn btn-flame sm" id="btnAddSsh">${ic('plus')}<span>Create SSH Account</span></button>`
     );
     if (!isViewer) {
       const btnAdd = $('#btnAddSsh'); if (btnAdd) btnAdd.onclick = () => openSshForm();
       const btnLive = $('#btnLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected SSH IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="sshLiveSheetBody">${sshSheetHtml(getLiveIps())}</div>`);
+      const btnUsers = $('#btnLiveUsers'); if (btnUsers) btnUsers.onclick = () => openSheet('Live Connected SSH Users', 'REAL-TIME ACTIVE SESSIONS · LIVE 2S', `<div id="sshUsersSheetBody">${sshUsersSheetHtml(getLiveUsersList())}</div>`);
     }
 
     $('#view').innerHTML = `
@@ -949,10 +963,14 @@
       const liveIps = getLiveIps();
       const liveBtnTxt = $('#btnLiveIpsTxt');
       if (liveBtnTxt) liveBtnTxt.textContent = `Connected IPs (${liveIps.length})`;
+      const liveUsersTxt = $('#btnLiveUsersTxt');
+      if (liveUsersTxt) liveUsersTxt.textContent = `Live Users (${getLiveUsersTotal()})`;
       const liveMeta = $('#sshLiveMeta');
       if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${items.length} accounts · live 2s`;
       const openModalBody = $('#sshLiveSheetBody');
       if (openModalBody) openModalBody.innerHTML = sshSheetHtml(liveIps);
+      const openUsersModalBody = $('#sshUsersSheetBody');
+      if (openUsersModalBody) openUsersModalBody.innerHTML = sshUsersSheetHtml(getLiveUsersList());
 
       const filtered = items.filter(u => u.username.toLowerCase().includes(STATE.searchSsh.toLowerCase()));
       host.innerHTML = filtered.length ? `<div class="cards">${filtered.map(u => {
@@ -993,8 +1011,8 @@
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats cols2">
-            <div class="st"><span>IP LIMIT</span><b>${u.ip_limit > 0 ? u.ip_limit + ' IP' : 'Unlimited'}</b></div>
-            <div class="st" title="${esc(ipList.join(', '))}"><span>LIVE IPS</span><b>${ipList.length}</b></div>
+            <div class="st"><span>USER LIMIT</span><b>${u.ip_limit > 0 ? u.ip_limit + ' Users' : 'Unlimited'}</b></div>
+            <div class="st" title="${onlineCnt} Active Users"><span>LIVE USERS</span><b>${onlineCnt}</b></div>
           </div>
           <div class="acc-act">
             <button class="btn sm btn-flame" data-ticket="${esc(u.username)}"><span>Info</span></button>
@@ -1061,7 +1079,7 @@
           <div class="tk-row"><span>Password</span><b>${esc(u.password || '••••')}</b><button class="icon-btn sm" data-cp="${esc(u.password || '')}">${ic('copy')}</button></div>
           <div class="tk-row"><span>Host / SNI</span><b>${esc(STATE.cfg.domain)}</b><button class="icon-btn sm" data-cp="${esc(STATE.cfg.domain)}">${ic('copy')}</button></div>
           <div class="tk-row"><span>Expiry</span><b>${esc(u.expiry)} (${daysLeft(u.expiry)}d)</b><span></span></div>
-          <div class="tk-row"><span>Limits</span><b>${u.gb_limit > 0 ? u.gb_limit + ' GB' : 'Unlimited'} · ${u.ip_limit > 0 ? u.ip_limit + ' IP' : 'Unlimited IP'}</b><span></span></div>
+          <div class="tk-row"><span>Limits</span><b>${u.gb_limit > 0 ? u.gb_limit + ' GB' : 'Unlimited'} · ${u.ip_limit > 0 ? u.ip_limit + ' Users' : 'Unlimited Users'}</b><span></span></div>
           <div class="tk-sec"></div>
           <div class="tk-label">PORTS &amp; ROUTING</div>
           <div class="tk-row"><span>SSH Direct</span><b>22, 109, 143</b><span></span></div>
@@ -1091,7 +1109,7 @@
         <div class="row3">
           <label class="field"><span>Days</span><div class="stepper"><button type="button">−</button><input name="days" type="number" min="1" value="${existing ? Math.max(1, daysLeft(existing.expiry)) : 30}" data-step="5"/><button type="button">+</button></div></label>
           <label class="field"><span>GB (0=∞)</span><div class="stepper"><button type="button">−</button><input name="gb_limit" type="number" min="0" value="${existing ? existing.gb_limit : 0}" data-step="10"/><button type="button">+</button></div></label>
-          <label class="field"><span>IP (0=∞)</span><div class="stepper"><button type="button">−</button><input name="ip_limit" type="number" min="0" value="${existing ? existing.ip_limit : 2}" data-step="1"/><button type="button">+</button></div></label>
+          <label class="field"><span>User Limit (0=∞)</span><div class="stepper"><button type="button">−</button><input name="ip_limit" type="number" min="0" value="${existing ? existing.ip_limit : 2}" data-step="1"/><button type="button">+</button></div></label>
         </div>
         <div class="foot">
           <button type="button" class="btn" id="sshCancel">Cancel</button>
@@ -1127,6 +1145,20 @@
 
     const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
 
+    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
+    const getXrayLiveUsersList = () => items
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (u.online > 0 || (u.ips && u.ips.length > 0)))
+      .map(u => ({
+        user: u.username,
+        proto: u.proto.toUpperCase(),
+        online: u.online || (u.ips || []).length || 0,
+        limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
+      }));
+
+    const xrayUsersSheetHtml = (usersList) => usersList.length
+      ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Live Users (Active Sessions)</th><th>User Limit</th></tr></thead><tbody>${usersList.map(r => `<tr><td><b>${esc(r.user)}</b></td><td><b>${esc(r.proto)}</b></td><td><span class="pill lit"><i class="dot lit"></i>${r.online} Active</span></td><td>${r.limit}</td></tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty"><p>No active ${STATE.xrayProto.toUpperCase()} user sessions right now.</p></div>`;
+
     const syncBayHeader = () => {
       setBayHead(
         'XRAY CORE',
@@ -1134,11 +1166,13 @@
         'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
         isViewer ? '' : `
          <button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
+         <button class="btn sm" id="btnXrayLiveUsers">${ic('user')}<span id="btnXrayLiveUsersTxt">Live Users (${getXrayLiveUsersTotal()})</span></button>
          <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
       );
       if (!isViewer) {
         const btnAdd = $('#btnAddXray'); if (btnAdd) btnAdd.onclick = () => openXrayForm(STATE.xrayProto);
         const btnLive = $('#btnXrayLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
+        const btnXUsers = $('#btnXrayLiveUsers'); if (btnXUsers) btnXUsers.onclick = () => openSheet(`Live Connected ${STATE.xrayProto.toUpperCase()} Users`, 'REAL-TIME ACTIVE SESSIONS · LIVE 2S', `<div id="xrayUsersSheetBody">${xrayUsersSheetHtml(getXrayLiveUsersList())}</div>`);
       }
     };
     syncBayHeader();
@@ -1161,8 +1195,12 @@
       const liveIps = getLiveIps();
       const liveBtnTxt = $('#btnXrayLiveIpsTxt');
       if (liveBtnTxt) liveBtnTxt.textContent = `Connected IPs (${liveIps.length})`;
+      const liveUsersTxt = $('#btnXrayLiveUsersTxt');
+      if (liveUsersTxt) liveUsersTxt.textContent = `Live Users (${getXrayLiveUsersTotal()})`;
       const openModalBody = $('#xrayLiveSheetBody');
       if (openModalBody) openModalBody.innerHTML = xraySheetHtml(liveIps);
+      const openXrayUsersModalBody = $('#xrayUsersSheetBody');
+      if (openXrayUsersModalBody) openXrayUsersModalBody.innerHTML = xrayUsersSheetHtml(getXrayLiveUsersList());
 
       const protoAll = items.filter(u => u.proto === STATE.xrayProto);
       const liveMeta = $('#xrayLiveMeta');
@@ -1200,7 +1238,7 @@
             ${hexAvatar(u.username[0].toUpperCase(), !isDis && onlineCnt > 0)}
             <div>
               <div class="acc-n">${esc(u.username)} ${badgeHtml}</div>
-              <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · cap <b>${u.ip_limit > 0 ? u.ip_limit + ' IP' : 'Unlimited'}</b> · exp <b>${esc(u.expiry)}</b></div>
+              <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · cap <b>${u.ip_limit > 0 ? u.ip_limit + ' Users' : 'Unlimited'}</b> · exp <b>${esc(u.expiry)}</b></div>
               <div class="uuid" data-cpuuid="${esc(u.uuid)}">${esc(u.uuid.slice(0, 18))}… ${ic('copy')}</div>
             </div>
           </div>
@@ -1209,7 +1247,7 @@
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats">
-            <div class="st" title="${esc(ipList.join(', '))}"><span>LIVE IPS</span><b>${onlineCnt}</b></div>
+            <div class="st" title="${onlineCnt} Active Users"><span>LIVE USERS</span><b>${onlineCnt}</b></div>
             <div class="st" title="${esc(wsPath)}"><span>WS PATH</span><b>${esc(wsPath)}</b></div>
             <div class="st"><span>EXPIRY</span><b>${daysLeft(u.expiry)}d</b></div>
           </div>
@@ -1322,7 +1360,7 @@
         <div class="row3">
           <label class="field"><span>Days</span><div class="stepper"><button type="button">−</button><input name="days" type="number" min="1" value="${existing ? Math.max(1, daysLeft(existing.expiry)) : 30}" data-step="5"/><button type="button">+</button></div></label>
           <label class="field"><span>GB (0=∞)</span><div class="stepper"><button type="button">−</button><input name="gb_limit" type="number" min="0" value="${existing ? existing.gb_limit : 0}" data-step="10"/><button type="button">+</button></div></label>
-          <label class="field"><span>IP (0=∞)</span><div class="stepper"><button type="button">−</button><input name="ip_limit" type="number" min="0" value="${existing ? existing.ip_limit : 2}" data-step="1"/><button type="button">+</button></div></label>
+          <label class="field"><span>User Limit (0=∞)</span><div class="stepper"><button type="button">−</button><input name="ip_limit" type="number" min="0" value="${existing ? existing.ip_limit : 2}" data-step="1"/><button type="button">+</button></div></label>
         </div>
         <div class="foot">
           <button type="button" class="btn" id="xCancel">Cancel</button>

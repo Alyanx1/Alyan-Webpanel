@@ -23,18 +23,21 @@ defaults
     log     global
     mode    tcp
     option  dontlognull
+    option  tcp-nodelay
     option  clitcpka
     option  srvtcpka
     timeout connect 5s
     timeout client  4h
     timeout server  4h
     timeout tunnel  12h
+    timeout client-fin 15s
+    timeout server-fin 15s
 
 # ─── PUBLIC PORT 80: HTTP / SSH-WS (/alyan) / Xray WS / ACME ─────────────────
 frontend fe_http_80
     bind *:80
     mode tcp
-    tcp-request inspect-delay 5s
+    tcp-request inspect-delay 1s
 
     acl is_raw_ssh    payload(0,4) -m bin 5353482d
     acl is_acme       payload(0,256) -m sub /.well-known/acme-challenge/
@@ -52,7 +55,7 @@ frontend fe_http_80
 frontend fe_edge_443
     bind *:443
     mode tcp
-    tcp-request inspect-delay 5s
+    tcp-request inspect-delay 1s
 
     acl is_raw_ssh  payload(0,4) -m bin 5353482d
     acl is_tls      req.ssl_hello_type 1
@@ -71,7 +74,7 @@ backend be_tls_loop
 frontend fe_tls_terminator
     bind 127.0.0.1:4443 accept-proxy ssl crt /etc/alyan/ssl/haproxy.pem alpn h2,http/1.1
     mode tcp
-    tcp-request inspect-delay 5s
+    tcp-request inspect-delay 1s
 
     acl is_alpn_h2    ssl_fc_alpn -i h2
     acl is_ssh_ssl    payload(0,4) -m bin 5353482d
