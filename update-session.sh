@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — Session-Based Live Users & Host/Edge IP Correlator
+#  🔥 ALYAN WEBPANEL — Session-Based Live Users & Real Client IP Correlator
 #  Converts: IP Limits & IP Counts → Active Device/User Sessions (1 User = Multiple Sessions)
-#  Correlates: Connected IPs with Exact Host/Edge Target IP (141.193.213.11, 185.111.111.156)
-#  Features  : Live Users Modal Sheet + 1-Click Rollback (--rollback)
+#  Correlates: Real Visitor / SIM Client IP (unwrapping CF-Connecting-IP / CloudFront / Bunny)
+#  Features  : Live Users Modal Sheet (No IP leak) + 1-Click Rollback (--rollback)
 # ═════════════════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
@@ -25,7 +25,7 @@ BACKUP_DIR="${VAR_DIR}/backup_pre_session"
 
 hdr() {
   echo -e "\n${C_RED}╔═════════════════════════════════════════════════════════════════════════════╗${C_RST}"
-  echo -e "${C_RED}║${C_RST}  ${C_AMB}${C_BOLD}🔥 ALYAN WEBPANEL — SESSION-BASED LIVE USERS & HOST IP UPDATE${C_RST}       ${C_RED}║${C_RST}"
+  echo -e "${C_RED}║${C_RST}  ${C_AMB}${C_BOLD}🔥 ALYAN WEBPANEL — SESSION-BASED LIVE USERS & REAL-IP UPDATE${C_RST}        ${C_RED}║${C_RST}"
   echo -e "${C_RED}╚═════════════════════════════════════════════════════════════════════════════╝${C_RST}"
 }
 
@@ -83,7 +83,7 @@ main() {
   [[ -f "${INSTALL_DIR}/cli/menu.sh" ]] && cp -f "${INSTALL_DIR}/cli/menu.sh" "${BACKUP_DIR}/menu.sh"
   echo -e "  ${C_GRN}✔ Backup stored safely in ${BACKUP_DIR}${C_RST}"
 
-  echo -e "\n${C_CYN}▶ [2/5] Updating Webpanel UI (Session-based Live Users & Modals)...${C_RST}"
+  echo -e "\n${C_CYN}▶ [2/5] Updating Webpanel UI (Session-based Live Users & Clean Sheet)...${C_RST}"
   cat > "${INSTALL_DIR}/panel/static/app.js" <<'EOF_APP_JS'
 /* ═══════════════════════════════════════════════════════════════════════
    ALYAN WEBPANEL — Frontend Engine (app.js)
@@ -446,7 +446,7 @@ main() {
   }
 
   function buildSshPayload(domain) {
-    return `GET /alyan HTTP/1.1[crlf]Host: ${domain}[crlf]X-Target: [host][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]`;
+    return `GET /alyan HTTP/1.1[crlf]Host: ${domain}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]`;
   }
   function buildSshShareText(u, cfg) {
     return [
@@ -2146,7 +2146,7 @@ main() {
 
 EOF_APP_JS
 
-  echo -e "\n${C_CYN}▶ [3/5] Updating Alyan Guard & WS Daemon (Exact Host/Edge IP Correlator)...${C_RST}"
+  echo -e "\n${C_CYN}▶ [3/5] Updating Alyan Guard & WS Daemon (Real Visitor/SIM IP Correlator)...${C_RST}"
   cat > "${INSTALL_DIR}/services/wsd/alyan-wsd.py" <<'EOF_WSD'
 #!/usr/bin/env python3
 """
@@ -2412,8 +2412,7 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
                 except asyncio.TimeoutError:
                     break
 
-        # Extract exact target host/edge IP from HTTP headers (e.g. X-Target: [host] -> 141.193.213.11)
-        target_ip_cand = None
+        # Extract Real Visitor/SIM Client IP (Option 1) & Custom Target Headers
         if b"\r\n" in payload and not payload.startswith(b"SSH-"):
             hdr_text = payload.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
             hdr_map = {}
@@ -2422,32 +2421,32 @@ async def handle_client(c_reader: asyncio.StreamReader, c_writer: asyncio.Stream
                     k, v = line.split(":", 1)
                     hdr_map[k.strip().lower()] = v.strip()
 
-            # 1. Custom injector target headers: X-Target, X-Edge-IP, X-Real-Host, X-Forwarded-Host, X-Host
-            for hk in ("x-target", "x-edge-ip", "x-real-host", "x-forwarded-host", "x-host", "b-cdn-edge-ip"):
+            target_cand = None
+            # 1. Custom injector headers (if passed)
+            for hk in ("x-target", "x-edge-ip", "x-real-host", "x-forwarded-host", "x-host"):
                 if hk in hdr_map:
                     raw_val = hdr_map[hk]
                     if ":" in raw_val and not raw_val.startswith("["):
                         raw_val = raw_val.split(":", 1)[0]
                     cand = normalize_ip(raw_val.split(",")[0].strip())
                     if cand and cand not in ("127.0.0.1", "::1"):
-                        target_ip_cand = cand
+                        target_cand = cand
                         break
 
-            # 2. Host header if an explicit IP was dialed (e.g. Host: 141.193.213.11)
-            if not target_ip_cand and "host" in hdr_map:
-                hval = hdr_map["host"]
-                if ":" in hval and not hval.startswith("["):
-                    hval = hval.split(":", 1)[0]
-                cand = normalize_ip(hval.strip())
-                if cand and cand not in ("127.0.0.1", "::1"):
-                    target_ip_cand = cand
+            # 2. Real Visitor / SIM Client IP from Cloudflare, CloudFront, BunnyCDN, etc.
+            if not target_cand and (is_trusted_cdn(real_ip) or p_ip):
+                for hk in ("cf-connecting-ip", "cloudfront-viewer-address", "true-client-ip", "b-cdn-viewer-address", "x-forwarded-for", "x-real-ip"):
+                    if hk in hdr_map:
+                        raw_val = hdr_map[hk]
+                        if ":" in raw_val and not raw_val.startswith("["):
+                            raw_val = raw_val.split(":", 1)[0]
+                        cand = normalize_ip(raw_val.split(",")[0].strip())
+                        if cand and cand not in ("127.0.0.1", "::1"):
+                            target_cand = cand
+                            break
 
-        if target_ip_cand:
-            real_ip = target_ip_cand
-        elif p_ip:
-            norm_p = normalize_ip(p_ip)
-            if norm_p and norm_p not in ("127.0.0.1", "::1"):
-                real_ip = norm_p
+            if target_cand:
+                real_ip = target_cand
 
         needs_101, tail = strip_ws_headers(payload)
         if needs_101:
@@ -3555,23 +3554,12 @@ map $alyan_cdn_ip_step2 $alyan_cdn_resolved_ip {
     default $alyan_cdn_ip_step2;
 }
 
-# Priority: X-Target header -> X-Edge-IP -> PROXY protocol addr -> remote_addr
-map $http_x_target $alyan_x_target_ip {
-    default $http_x_target;
-    ""      $http_x_edge_ip;
-}
-
-map $alyan_x_target_ip $alyan_connected_edge_ip {
+map $alyan_cdn_resolved_ip $alyan_real_ip {
     ""      $proxy_protocol_addr;
-    default $alyan_x_target_ip;
+    default $alyan_cdn_resolved_ip;
 }
 
-map $alyan_connected_edge_ip $alyan_final_edge_ip {
-    ""      $remote_addr;
-    default $alyan_connected_edge_ip;
-}
-
-log_format alyan_xray '$time_iso8601 $alyan_final_edge_ip $status $request_uri';
+log_format alyan_xray '$time_iso8601 $alyan_real_ip $status $request_uri';
 
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {
@@ -3923,7 +3911,7 @@ opt_manage_users() {
           echo -e "  ${C_GRY}Host / SNI :${C_RST} ${C_GLD}${dom}${C_RST}"
           echo -e "  ${C_GRY}Username   :${C_RST} ${C_WHT}${u}${C_RST}   ${C_GRY}Password:${C_RST} ${C_WHT}${p}${C_RST}   ${C_GRY}Expires:${C_RST} ${C_AMB}${exp}${C_RST}"
           echo -e "  ${C_GRY}Ports      :${C_RST} Direct 22, 109, 143 · WS 80 · WS-SSL 443 (/alyan)"
-          echo -e "  ${C_GRY}Payload    :${C_RST} ${C_AMB}GET /alyan HTTP/1.1[crlf]Host: ${dom}[crlf]X-Target: [host][crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${C_RST}"
+          echo -e "  ${C_GRY}Payload    :${C_RST} ${C_AMB}GET /alyan HTTP/1.1[crlf]Host: ${dom}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]${C_RST}"
         else
           echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
         fi
@@ -4266,11 +4254,11 @@ if target.parent.exists():
   done
 
   echo -e "\n${C_GRN}${C_BOLD}═════════════════════════════════════════════════════════════════════════════${C_RST}"
-  echo -e "${C_GRN}${C_BOLD}✔ ALYAN WEBPANEL SESSION-BASED LIVE USERS UPDATE INSTALLED!${C_RST}"
+  echo -e "${C_GRN}${C_BOLD}✔ ALYAN WEBPANEL SESSION-BASED LIVE USERS & REAL-IP UPDATE INSTALLED!${C_RST}"
   echo -e "${C_WHT}• Simultaneous Sessions Tracking  : ${C_GLD}ACTIVE${C_RST} (1 SSH/Xray user on 5 devices = 5 Live Users)"
   echo -e "${C_WHT}• Session-Based User Limit        : ${C_GLD}ACTIVE${C_RST} (Configurable 0=∞ in Webpanel & CLI)"
-  echo -e "${C_WHT}• Live Users Modal Sheet          : ${C_GLD}ACTIVE${C_RST} (Clean session table without Connected IPs)"
-  echo -e "${C_WHT}• Target Host/Edge IP Extraction  : ${C_GLD}ACTIVE${C_RST} (Reads X-Target, X-Edge-IP, & PROXY Host)"
+  echo -e "${C_WHT}• Live Users Modal Sheet          : ${C_GLD}ACTIVE${C_RST} (Shows Account & Sessions; NO IP displayed)"
+  echo -e "${C_WHT}• Real Visitor / SIM IP Correlator: ${C_GLD}ACTIVE${C_RST} (Unwraps CF-Connecting-IP, CloudFront, etc.)"
   echo -e "${C_GRY}• To rollback anytime             : ${C_AMB}sudo bash update-session.sh --rollback${C_RST}"
   echo -e "${C_GRN}${C_BOLD}═════════════════════════════════════════════════════════════════════════════${C_RST}\n"
 }
