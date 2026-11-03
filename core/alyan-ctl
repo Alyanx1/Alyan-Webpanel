@@ -175,7 +175,8 @@ def ssl_days_remaining() -> int:
         # notAfter=Jan 28 06:00:00 2027 GMT
         dt_str = out.split("=", 1)[1].strip()
         exp = dt.datetime.strptime(dt_str, "%b %d %H:%M:%S %Y %Z")
-        days = max(0, (exp - dt.datetime.utcnow()).days)
+        now_utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+        days = max(0, (exp - now_utc).days)
         try:
             SSL_CACHE.write_text(json.dumps({"mtime": mtime, "ts": time.time(), "days": days}), encoding="utf-8")
         except Exception:

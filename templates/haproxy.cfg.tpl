@@ -23,7 +23,6 @@ defaults
     log     global
     mode    tcp
     option  dontlognull
-    option  tcp-nodelay
     option  clitcpka
     option  srvtcpka
     timeout connect 5s
