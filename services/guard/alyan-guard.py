@@ -81,6 +81,7 @@ XRAY_ACTIVE_DEVICES: dict[str, dict[str, dict]] = {}
 
 LAST_XRAY_STATS_TS: float | None = None
 LAST_SSH_STATS_TS: float | None = None
+XRAY_STAT_LAST_VAL: dict[str, int] = {}
 XRAY_BPS: dict[str, int] = {}
 XRAY_LAST_ACTIVE_TRAFFIC_TS: dict[str, float] = {}
 SSH_BPS: dict[str, int] = {}
@@ -391,22 +392,33 @@ def collect_services_fast() -> list[dict]:
 
 
 def refresh_auth_pid_cache(canon_users: dict[str, str], needed_pids: set[int] | None = None):
-    """Scan Dropbear & OpenSSH logs only when needed to map worker PID -> user."""
+    """Scan Dropbear & OpenSSH logs to map worker PID -> user."""
     for dead in [p for p in list(PID_AUTH_CACHE.keys()) if not Path(f"/proc/{p}").exists()]:
         PID_AUTH_CACHE.pop(dead, None)
 
-    if needed_pids is not None and needed_pids.issubset(PID_AUTH_CACHE.keys()):
+    if needed_pids and needed_pids.issubset(PID_AUTH_CACHE.keys()):
         return
 
     lines: list[str] = []
+    try:
+        out = subprocess.check_output(
+            ["journalctl", "-u", "dropbear", "-u", "ssh", "-u", "sshd", "-t", "dropbear", "-t", "sshd", "-n", "150", "--no-pager", "-o", "short-iso"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=1.8,
+        )
+        lines.extend(out.splitlines())
+    except Exception:
+        pass
+
     auth_log = Path("/var/log/auth.log")
     if auth_log.exists():
         try:
             with auth_log.open("rb") as f:
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
-                f.seek(max(0, sz - 16384))
-                lines.extend(f.read().decode("utf-8", errors="ignore").splitlines()[-100:])
+                f.seek(max(0, sz - 32768))
+                lines.extend(f.read().decode("utf-8", errors="ignore").splitlines()[-150:])
         except Exception:
             pass
 
@@ -426,34 +438,6 @@ def refresh_auth_pid_cache(canon_users: dict[str, str], needed_pids: set[int] | 
             u_low = m_sh.group(2).lower()
             if u_low in canon_users and Path(f"/proc/{pid}").exists():
                 PID_AUTH_CACHE[pid] = canon_users[u_low]
-
-    # Only run journalctl if needed_pids are still unresolved
-    if needed_pids is not None and not needed_pids.issubset(PID_AUTH_CACHE.keys()):
-        try:
-            out = subprocess.check_output(
-                ["journalctl", "-u", "dropbear", "-u", "ssh", "-u", "sshd", "-n", "40", "--no-pager", "-o", "short-iso"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-                timeout=1.5,
-            )
-            for ln in out.splitlines():
-                m_db = DROPBEAR_AUTH_RE.search(ln)
-                if m_db:
-                    pid_s = m_db.group(1) or m_db.group(2)
-                    if pid_s:
-                        pid = int(pid_s)
-                        u_low = m_db.group(3).lower()
-                        if u_low in canon_users and Path(f"/proc/{pid}").exists():
-                            PID_AUTH_CACHE[pid] = canon_users[u_low]
-                    continue
-                m_sh = SSHD_AUTH_RE.search(ln)
-                if m_sh:
-                    pid = int(m_sh.group(1))
-                    u_low = m_sh.group(2).lower()
-                    if u_low in canon_users and Path(f"/proc/{pid}").exists():
-                        PID_AUTH_CACHE[pid] = canon_users[u_low]
-        except Exception:
-            pass
 
 
 def query_haproxy_sessions() -> tuple[dict[str, str], list[str], list[str], list[str]]:
@@ -508,7 +492,10 @@ def pid_to_username(pid: int, uid_map: dict[int, str], canon_users: dict[str, st
     if pid in PID_AUTH_CACHE:
         return PID_AUTH_CACHE[pid]
     try:
-        status_txt = Path(f"/proc/{pid}/status").read_text()
+        status_path = Path(f"/proc/{pid}/status")
+        if not status_path.exists():
+            return None
+        status_txt = status_path.read_text()
         ppid = 0
         for line in status_txt.splitlines():
             if line.startswith("PPid:"):
@@ -521,6 +508,25 @@ def pid_to_username(pid: int, uid_map: dict[int, str], canon_users: dict[str, st
         if ppid and ppid in PID_AUTH_CACHE:
             PID_AUTH_CACHE[pid] = PID_AUTH_CACHE[ppid]
             return PID_AUTH_CACHE[ppid]
+
+        # Check child processes of pid (e.g. Dropbear worker spawning user session/shell)
+        children_path = Path(f"/proc/{pid}/task/{pid}/children")
+        if children_path.exists():
+            try:
+                for c_pid_str in children_path.read_text().split():
+                    c_pid = int(c_pid_str)
+                    c_status = Path(f"/proc/{c_pid}/status")
+                    if c_status.exists():
+                        for line in c_status.read_text().splitlines():
+                            if line.startswith("Uid:"):
+                                for u in (int(x) for x in line.split()[1:5]):
+                                    if u in uid_map:
+                                        resolved = uid_map[u]
+                                        PID_AUTH_CACHE[pid] = resolved
+                                        PID_AUTH_CACHE[c_pid] = resolved
+                                        return resolved
+            except Exception:
+                pass
 
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("latin1", errors="ignore")
         m = re.search(r"sshd(?:-session)?:\s*([A-Za-z0-9_-]+)", cmdline)
@@ -548,7 +554,6 @@ def read_pid_io_bytes(pid: int) -> int:
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> tuple[dict[str, list[dict]], dict[str, int]]:
     canon_users = {u.lower(): u for u in managed_users}
-    refresh_auth_pid_cache(canon_users)
 
     uid_map: dict[int, str] = {}
     try:
@@ -575,6 +580,8 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
     except Exception:
         out = ""
 
+    raw_pids: set[int] = set()
+    parsed_lines: list[tuple[str, str, str, list[int]]] = []
     for line in out.splitlines():
         if "ESTAB" not in line:
             continue
@@ -593,6 +600,13 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
             peer_ip = peer_ip[7:]
 
         pids = [int(x) for x in re.findall(r"pid=(\d+)", line)]
+        raw_pids.update(pids)
+        parsed_lines.append((lport, peer_ip, peer_port, pids))
+
+    # Pre-populate auth cache for any active PIDs found in ss output
+    refresh_auth_pid_cache(canon_users, needed_pids=raw_pids)
+
+    for lport, peer_ip, peer_port, pids in parsed_lines:
         username = None
         target_pid = None
         for pid in pids:
@@ -613,16 +627,22 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
         elif peer_ip == "127.0.0.1" and peer_port in hap_loop_ips:
             real_ip = hap_loop_ips[peer_port]
             cur_io = read_pid_io_bytes(target_pid)
-            prev_io = PID_LAST_IO_BYTES.get(target_pid, 0)
-            if cur_io > prev_io:
-                deltas[username] += (cur_io - prev_io)
-            PID_LAST_IO_BYTES[target_pid] = cur_io
+            if target_pid not in PID_LAST_IO_BYTES:
+                PID_LAST_IO_BYTES[target_pid] = cur_io
+            else:
+                prev_io = PID_LAST_IO_BYTES[target_pid]
+                if cur_io > prev_io:
+                    deltas[username] += (cur_io - prev_io)
+                PID_LAST_IO_BYTES[target_pid] = cur_io
         else:
             cur_io = read_pid_io_bytes(target_pid)
-            prev_io = PID_LAST_IO_BYTES.get(target_pid, 0)
-            if cur_io > prev_io:
-                deltas[username] += (cur_io - prev_io)
-            PID_LAST_IO_BYTES[target_pid] = cur_io
+            if target_pid not in PID_LAST_IO_BYTES:
+                PID_LAST_IO_BYTES[target_pid] = cur_io
+            else:
+                prev_io = PID_LAST_IO_BYTES[target_pid]
+                if cur_io > prev_io:
+                    deltas[username] += (cur_io - prev_io)
+                PID_LAST_IO_BYTES[target_pid] = cur_io
 
         if real_ip and real_ip != "127.0.0.1":
             sessions_by_user[username].append(
@@ -634,7 +654,10 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
         if not uname or uname not in deltas:
             continue
         cur_b = int(info.get("bytes", 0))
-        prev_b = WSD_PORT_LAST_BYTES.get(port, 0)
+        if port not in WSD_PORT_LAST_BYTES:
+            WSD_PORT_LAST_BYTES[port] = cur_b
+            continue
+        prev_b = WSD_PORT_LAST_BYTES[port]
         if cur_b > prev_b:
             deltas[uname] += (cur_b - prev_b)
         WSD_PORT_LAST_BYTES[port] = cur_b
@@ -690,12 +713,12 @@ def poll_xray_stats_and_ips(
 ) -> tuple[dict[str, int], dict[str, int], dict[str, list[str]], dict[str, int]]:
     """
     Returns:
-      - deltas: uuid -> bytes transferred since last tick
+      - deltas: uuid -> bytes transferred since last tick (strictly real incremental delta)
       - bps_by_uuid: uuid -> smoothed real downloading speed in bytes/sec
       - ips_by_uuid: uuid -> list of clean real visitor IPs (no Cloudflare/CDN proxy IPs)
       - dev_count_by_uuid: uuid -> exact count of distinct active users/devices
     """
-    global LAST_XRAY_STATS_TS
+    global LAST_XRAY_STATS_TS, XRAY_STAT_LAST_VAL
     now_ts = time.time()
     if LAST_XRAY_STATS_TS is None:
         elapsed = 2.0
@@ -717,20 +740,36 @@ def poll_xray_stats_and_ips(
     deltas: dict[str, int] = {}
     if Path("/usr/local/bin/xray").exists():
         try:
+            # Query stats WITHOUT -reset=true so Xray counters are monotonic and never falsely double-counted
             raw = subprocess.check_output(
-                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset=true"],
+                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>"],
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=2.0,
             )
             data = json.loads(raw) if raw.strip() else {}
             for st in data.get("stat", []):
-                parts = st.get("name", "").split(">>>")
+                st_name = st.get("name", "")
+                parts = st_name.split(">>>")
                 if len(parts) >= 4:
                     tag_low = parts[1].split("@", 1)[0].lower()
                     uid = tag_to_uuid.get(tag_low) or tag_to_uuid.get(tag_low.split(".")[0])
                     if uid:
-                        deltas[uid] = deltas.get(uid, 0) + int(st.get("value", 0))
+                        cur_val = int(st.get("value", 0))
+                        if st_name not in XRAY_STAT_LAST_VAL:
+                            # First time observing this stat: establish baseline, delta is 0
+                            XRAY_STAT_LAST_VAL[st_name] = cur_val
+                            delta = 0
+                        else:
+                            prev_val = XRAY_STAT_LAST_VAL[st_name]
+                            if cur_val >= prev_val:
+                                delta = cur_val - prev_val
+                            else:
+                                # Counter wrapped or Xray daemon restarted
+                                delta = cur_val
+                            XRAY_STAT_LAST_VAL[st_name] = cur_val
+                        if delta > 0:
+                            deltas[uid] = deltas.get(uid, 0) + delta
         except Exception:
             pass
 
@@ -811,9 +850,9 @@ def poll_xray_stats_and_ips(
 
         idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
 
-        # ── REAL-TIME DISCONNECT (within 2 to 4 seconds) ──
+        # ── REAL-TIME DISCONNECT (within 2 seconds) ──
         # Drop immediately when sockets close or no traffic flows after disconnect
-        if active_sockets == 0 or (not active_traffic and uid not in latest_ip_from_log and idle_sec > 10.0):
+        if active_sockets == 0 or (not active_traffic and uid not in latest_ip_from_log and idle_sec > 6.0):
             dev_map.clear()
             ips_by_uuid[uid] = []
             dev_count_by_uuid[uid] = 0
@@ -850,14 +889,25 @@ def poll_xray_stats_and_ips(
             if fallback_ip:
                 dev_map[fallback_ip] = {"ip": fallback_ip, "ts": now_ts}
 
-        # Clear devices not seen for > 12s
-        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 12.0]:
+        # Clear devices not seen for > 8s
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 8.0]:
             dev_map.pop(stale_k, None)
 
-        online_ips = sorted({v["ip"] for v in dev_map.values()})
-        ips_by_uuid[uid] = online_ips
-        # Session / user count: 1 client device = 1 user
-        dev_count_by_uuid[uid] = len(online_ips) if online_ips else (1 if (active_traffic or active_sockets > 0) else 0)
+        # Strictly cap dev_map to active_sockets count (prevent phantom multi-IP accumulation)
+        max_allowed = max(1, active_sockets)
+        if len(dev_map) > max_allowed:
+            sorted_items = sorted(dev_map.items(), key=lambda kv: kv[1]["ts"], reverse=True)
+            for stale_key, _ in sorted_items[max_allowed:]:
+                dev_map.pop(stale_key, None)
+
+        # User sessions strictly bounded by active sockets:
+        # If 1 socket is open, user_sessions is AT MOST 1. It can NEVER be 2!
+        user_sessions = min(active_sockets, max(1 if (active_traffic or active_sockets > 0) else 0, len(dev_map)))
+        dev_count_by_uuid[uid] = user_sessions
+
+        # Keep only the freshest user_sessions IPs
+        fresh_sorted_ips = [v["ip"] for v in sorted(dev_map.values(), key=lambda x: x["ts"], reverse=True)]
+        ips_by_uuid[uid] = fresh_sorted_ips[:user_sessions] if fresh_sorted_ips else ([best_ip] if best_ip and user_sessions > 0 else [])
 
     return deltas, bps_by_uuid, ips_by_uuid, dev_count_by_uuid
 

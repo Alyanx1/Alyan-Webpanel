@@ -1159,7 +1159,9 @@
     STATE.cfg = initData.cfg; syncHud();
 
     const getOnlineCount = (u) => (u.status === 'disabled' ? 0 : (u.online || 0));
-    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
+    const getLiveIps = () => items
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto)
+      .flatMap(u => (u.ips || []).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
 
     const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + getOnlineCount(u), 0);
     const getXrayLiveUsersList = () => items
