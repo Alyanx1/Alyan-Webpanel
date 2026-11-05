@@ -990,10 +990,13 @@ def format_ssh_row(row: sqlite3.Row, ssh_live: dict, is_viewer: bool = False) ->
     uname = row["username"]
     is_dis = row["status"] == "disabled"
     live = ssh_live.get(uname, {})
+    live_used = live.get("used_bytes")
+    used_bytes = int(live_used) if (live_used is not None and not is_viewer) else int(row["used_bytes"])
     return {
         "username": uname,
         "password": "••••" if is_viewer else row["password"],
-        "used_bytes": int(row["used_bytes"]),
+        "used_bytes": used_bytes,
+        "delta": 0 if (is_dis or is_viewer) else int(live.get("delta", 0)),
         "gb_limit": float(row["gb_limit"]),
         "ip_limit": 0 if is_viewer else int(row["ip_limit"]),
         "online": 0 if (is_dis or is_viewer) else int(live.get("online", 0)),
@@ -1131,11 +1134,14 @@ def ssh_del(conn: sqlite3.Connection, actor_info: dict, username: str, ip: str =
 def format_xray_row(row: sqlite3.Row, xray_live: dict, is_viewer: bool = False) -> dict:
     live = xray_live.get(row["uuid"], {})
     is_dis = row["status"] == "disabled"
+    live_used = live.get("used_bytes")
+    used_bytes = int(live_used) if (live_used is not None and not is_viewer) else int(row["used_bytes"])
     return {
         "username": row["username"],
         "proto": row["proto"],
         "uuid": "••••••••-••••-••••-••••-••••••••••••" if is_viewer else row["uuid"],
-        "used_bytes": int(row["used_bytes"]),
+        "used_bytes": used_bytes,
+        "delta": 0 if (is_dis or is_viewer) else int(live.get("delta", 0)),
         "gb_limit": float(row["gb_limit"]),
         "ip_limit": 0 if is_viewer else int(row["ip_limit"]),
         "online": 0 if (is_dis or is_viewer) else int(live.get("online", 0)),

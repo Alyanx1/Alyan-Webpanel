@@ -318,12 +318,15 @@
   }
 
   /* ─── Formatting & QR Helpers ─── */
-  const fmtBytes = (b) => {
+  const fmtBytes = (b, highPrecision = false) => {
     const n = Math.max(0, Number(b) || 0);
     if (n < 1024) return Math.round(n) + ' B';
     const u = ['KB', 'MB', 'GB', 'TB'];
     let i = -1, v = n;
     do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
+    if (highPrecision && i === 2) {
+      return (v < 100 ? v.toFixed(3) : v.toFixed(2)) + ' GB';
+    }
     return (v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + u[i];
   };
   const fmtRate = (bps) => fmtBytes(bps) + '/s';
@@ -921,13 +924,14 @@
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
+    const getOnlineCount = (u) => (u.status === 'disabled' ? 0 : (u.online || 0));
     const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, ip })));
-    const getLiveUsersTotal = () => items.reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
+    const getLiveUsersTotal = () => items.reduce((acc, u) => acc + getOnlineCount(u), 0);
     const getLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && (u.online > 0 || (u.ips && u.ips.length > 0)))
+      .filter(u => u.status !== 'disabled' && getOnlineCount(u) > 0)
       .map(u => ({
         user: u.username,
-        online: u.online || (u.ips || []).length || 0,
+        online: getOnlineCount(u),
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -992,11 +996,13 @@
             </div>
           </article>`;
         }
-        const ipList = isDis ? [] : (u.ips || []);
-        const onlineCnt = isDis ? 0 : (u.online || ipList.length || 0);
+        const onlineCnt = getOnlineCount(u);
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
+        const rateHtml = (!isDis && onlineCnt > 0 && (u.delta || 0) > 0)
+          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate((u.delta || 0) / 2)}</span>`
+          : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
@@ -1007,7 +1013,7 @@
             </div>
           </div>
           <div class="meter">
-            <div class="meter-h"><span>DATA QUOTA</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+            <div class="meter-h"><span>DATA QUOTA${rateHtml}</span><b>${fmtBytes(u.used_bytes, true)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats cols2">
@@ -1143,15 +1149,16 @@
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
+    const getOnlineCount = (u) => (u.status === 'disabled' ? 0 : (u.online || 0));
     const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
 
-    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
+    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + getOnlineCount(u), 0);
     const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (u.online > 0 || (u.ips && u.ips.length > 0)))
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && getOnlineCount(u) > 0)
       .map(u => ({
         user: u.username,
         proto: u.proto.toUpperCase(),
-        online: u.online || (u.ips || []).length || 0,
+        online: getOnlineCount(u),
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -1226,12 +1233,14 @@
             </div>
           </article>`;
         }
-        const ipList = isDis ? [] : (u.ips || []);
-        const onlineCnt = isDis ? 0 : (ipList.length || u.online || 0);
+        const onlineCnt = getOnlineCount(u);
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
         const wsPath = `/alyan-${u.proto}`;
+        const rateHtml = (!isDis && onlineCnt > 0 && (u.delta || 0) > 0)
+          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate((u.delta || 0) / 2)}</span>`
+          : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
@@ -1243,7 +1252,7 @@
             </div>
           </div>
           <div class="meter">
-            <div class="meter-h"><span>TRAFFIC</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+            <div class="meter-h"><span>TRAFFIC${rateHtml}</span><b>${fmtBytes(u.used_bytes, true)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats">
@@ -2019,6 +2028,9 @@
     $('#btnPalette').onclick = openPalette;
     window.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && STATE.bay) { go(STATE.bay); }
     });
     $('#btnMe').onclick = () => {
       openSheet(`Signed in as ${STATE.me.username}`, 'SESSION PROFILE', `

@@ -724,20 +724,27 @@ def poll_xray_stats_and_ips(
         active_traffic = user_traffic > 0
         active_sockets = proto_socket_counts.get(proto, 0)
 
-        if active_traffic:
+        if active_traffic or uid in latest_ip_from_log:
             XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
         idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
 
         # ── REAL-TIME DISCONNECT (within 2 seconds) ──
-        # Disconnect triggers immediately if no active sockets exist OR if no traffic for > 3.0 seconds
-        if active_sockets == 0 or (not active_traffic and idle_sec > 3.0):
+        # Disconnect triggers immediately when all inbound sockets for this protocol close
+        if active_sockets == 0:
             dev_map.clear()
             ips_by_uuid[uid] = []
             dev_count_by_uuid[uid] = 0
             continue
 
-        # If data is actively transferring OR user is within 3.0s active window:
+        # If user has been completely idle with no traffic or log entry for > 180s, drop
+        if not active_traffic and uid not in latest_ip_from_log and idle_sec > 180.0:
+            dev_map.clear()
+            ips_by_uuid[uid] = []
+            dev_count_by_uuid[uid] = 0
+            continue
+
+        # If data is actively transferring OR user is within active session window:
         best_ip = None
         if uid in latest_ip_from_log:
             best_ip = latest_ip_from_log[uid]
@@ -751,20 +758,15 @@ def poll_xray_stats_and_ips(
             best_ip = h2c_ips[0]
 
         if best_ip:
-            dev_k = f"{best_ip}:{len(dev_map)}" if best_ip in dev_map else best_ip
-            dev_map[dev_k] = {"ip": best_ip, "ts": now_ts}
-            max_devs = max(1, active_sockets)
-            if len(dev_map) > max_devs:
-                sorted_keys = sorted(dev_map.keys(), key=lambda k: dev_map[k]["ts"], reverse=True)
-                for k in sorted_keys[max_devs:]:
-                    dev_map.pop(k, None)
+            dev_map[best_ip] = {"ip": best_ip, "ts": now_ts}
 
-        # Short timeout (3.5s) for any lingering device
-        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 3.5]:
+        # Clear devices not seen for > 15 seconds
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 15.0]:
             dev_map.pop(stale_k, None)
 
-        ips_by_uuid[uid] = sorted({v["ip"] for v in dev_map.values()})
-        dev_count_by_uuid[uid] = max(len(ips_by_uuid[uid]), len(dev_map))
+        online_ips = sorted({v["ip"] for v in dev_map.values()})
+        ips_by_uuid[uid] = online_ips
+        dev_count_by_uuid[uid] = min(active_sockets, max(1, len(online_ips)))
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 
@@ -812,11 +814,13 @@ def enforce_cycle():
         ssh_sessions, ssh_deltas = scan_ssh_sessions(managed_ssh, hap_loop_ips)
         xray_deltas, xray_ips, xray_fresh_devs = poll_xray_stats_and_ips(xray_rows, ws_ips, h2c_ips, trojan_ips)
 
-        # ─── 1. Enforce SSH Quotas, Expiry & Strict IP Limit Auto-Disable ───
+        # ─── 1. Enforce SSH Quotas, Expiry & Strict User Limit Auto-Disable ───
+        ssh_used_map: dict[str, int] = {}
         for r in ssh_rows:
             uname = r["username"]
             delta_b = int(ssh_deltas.get(uname, 0))
             used = int(r["used_bytes"]) + delta_b
+            ssh_used_map[uname] = used
             if delta_b > 0:
                 conn.execute("UPDATE ssh_users SET used_bytes = ? WHERE username = ?", (used, uname))
 
@@ -868,13 +872,15 @@ def enforce_cycle():
                 ssh_sessions[uname] = []
                 send_telegram_alert(bot_cfg, reason)
 
-        # ─── 2. Enforce Xray Quotas, Expiry & Strict IP Limit Auto-Disable ───
+        # ─── 2. Enforce Xray Quotas, Expiry & Strict User Limit Auto-Disable ───
+        xray_used_map: dict[str, int] = {}
         xray_resync_needed = False
         for r in xray_rows:
             uname = r["username"]
             uuid = r["uuid"]
             delta_x = int(xray_deltas.get(uuid, 0))
             used = int(r["used_bytes"]) + delta_x
+            xray_used_map[uuid] = used
             if delta_x > 0:
                 conn.execute("UPDATE xray_users SET used_bytes = ? WHERE uuid = ?", (used, uuid))
 
@@ -934,20 +940,28 @@ def enforce_cycle():
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
-    for uname, conns in ssh_sessions.items():
+    for r in ssh_rows:
+        uname = r["username"]
+        conns = ssh_sessions.get(uname, [])
         ips = sorted({c["ip"] for c in conns if c.get("ip")})
-        ssh_live[uname] = {"online": len(conns), "ips": ips}
+        ssh_live[uname] = {
+            "online": len(conns),
+            "ips": ips,
+            "used_bytes": ssh_used_map.get(uname, int(r["used_bytes"])),
+            "delta": int(ssh_deltas.get(uname, 0)),
+        }
 
     xray_live = {}
     for r in xray_rows:
         uid = r["uuid"]
         ips = xray_ips.get(uid, [])
         user_sess_cnt = xray_fresh_devs.get(uid, 0)
-        if user_sess_cnt == 0 and ips:
-            user_sess_cnt = len(ips)
-        if user_sess_cnt == 0 and int(xray_deltas.get(uid, 0)) > 0:
-            user_sess_cnt = 1
-        xray_live[uid] = {"online": user_sess_cnt, "ips": ips}
+        xray_live[uid] = {
+            "online": user_sess_cnt,
+            "ips": ips,
+            "used_bytes": xray_used_map.get(uid, int(r["used_bytes"])),
+            "delta": int(xray_deltas.get(uid, 0)),
+        }
 
     snapshot = {
         "updated_at": int(time.time()),
