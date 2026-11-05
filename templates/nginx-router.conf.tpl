@@ -13,26 +13,60 @@ map $http_cloudfront_viewer_address $alyan_cf_viewer_ip {
     "~^([0-9a-fA-F\.:]+):\d+"     $1;
 }
 
+# BunnyCDN Viewer Address (Bunny CDN Real Client IP without :port)
+map $http_b_cdn_viewer_address $alyan_b_cdn_viewer_ip {
+    default                      "";
+    "~^([0-9a-fA-F\.:]+):\d+"     $1;
+}
+
+# Custom injector target headers (e.g. X-Target dialed IP)
+map $http_x_target $alyan_x_target_ip {
+    default                      "";
+    "~^([0-9a-fA-F\.:]+)"        $1;
+}
+
 # First IP from X-Forwarded-For
 map $http_x_forwarded_for $alyan_xff_first {
     default                      "";
     "~^([0-9a-fA-F\.:]+)"        $1;
 }
 
-# Unified CDN Header Priority: CloudFront Viewer Address -> CF-Connecting-IP -> True-Client-IP -> X-Forwarded-For
-map $alyan_cf_viewer_ip $alyan_cdn_ip_step1 {
+# Unified CDN Header Priority:
+# 1. Custom Dialed Target (X-Target)
+# 2. Bunny CDN Viewer Address (B-CDN-Viewer-Address)
+# 3. AWS CloudFront (CloudFront-Viewer-Address)
+# 4. Cloudflare (CF-Connecting-IP)
+# 5. True-Client-IP
+# 6. X-Real-IP
+# 7. X-Forwarded-For
+map $alyan_x_target_ip $alyan_cdn_step0 {
+    ""      $alyan_b_cdn_viewer_ip;
+    default $alyan_x_target_ip;
+}
+
+map $alyan_cdn_step0 $alyan_cdn_step1 {
+    ""      $alyan_cf_viewer_ip;
+    default $alyan_cdn_step0;
+}
+
+map $alyan_cdn_step1 $alyan_cdn_step2 {
     ""      $http_cf_connecting_ip;
-    default $alyan_cf_viewer_ip;
+    default $alyan_cdn_step1;
 }
 
-map $alyan_cdn_ip_step1 $alyan_cdn_ip_step2 {
+map $alyan_cdn_step2 $alyan_cdn_step3 {
     ""      $http_true_client_ip;
-    default $alyan_cdn_ip_step1;
+    default $alyan_cdn_step2;
 }
 
-map $alyan_cdn_ip_step2 $alyan_cdn_resolved_ip {
+map $alyan_cdn_step3 $alyan_cdn_step4 {
+    ""      $http_x_real_ip;
+    default $alyan_cdn_step3;
+}
+
+map $alyan_cdn_step4 $alyan_cdn_resolved_ip {
     ""      $alyan_xff_first;
-    default $alyan_cdn_ip_step2;
+    default $alyan_cdn_step4;
 }
 
 map $alyan_cdn_resolved_ip $alyan_real_ip {
@@ -40,7 +74,7 @@ map $alyan_cdn_resolved_ip $alyan_real_ip {
     default $alyan_cdn_resolved_ip;
 }
 
-log_format alyan_xray '$time_iso8601 $alyan_real_ip $status $request_uri';
+log_format alyan_xray '$msec $alyan_real_ip $status $request_uri';
 
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {

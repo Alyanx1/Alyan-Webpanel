@@ -79,6 +79,13 @@ PID_LAST_IO_BYTES: dict[int, int] = {}
 # uuid -> {device_key: {"ip": str, "ts": float}}
 XRAY_ACTIVE_DEVICES: dict[str, dict[str, dict]] = {}
 
+LAST_XRAY_STATS_TS: float | None = None
+LAST_SSH_STATS_TS: float | None = None
+XRAY_BPS: dict[str, int] = {}
+XRAY_LAST_ACTIVE_TRAFFIC_TS: dict[str, float] = {}
+SSH_BPS: dict[str, int] = {}
+SSH_LAST_ACTIVE_TRAFFIC_TS: dict[str, float] = {}
+
 # Consecutive multi-IP violation strikes before auto-disable
 SSH_IP_STRIKES: dict[str, int] = {}
 XRAY_IP_STRIKES: dict[str, int] = {}
@@ -91,7 +98,7 @@ SSHD_AUTH_RE = re.compile(
     r"sshd(?:-session)?\[(\d+)\]:\s+Accepted\s+\S+\s+for\s+(\S+)\s+from",
     re.IGNORECASE,
 )
-XRAY_EMAIL_RE = re.compile(r"email:\s*([^\s@]+)@alyan", re.IGNORECASE)
+XRAY_EMAIL_RE = re.compile(r"email:\s*([^\s@]+)(?:@[^\s]+)?", re.IGNORECASE)
 XRAY_FROM_RAW_RE = re.compile(
     r"(?:\bfrom\s+)?(?:tcp:|udp:)?(\[[0-9a-fA-F:]+\]:[0-9]+|[0-9a-fA-F\.:]+:[0-9]+|[0-9\.]+)\s+accepted\b",
     re.IGNORECASE,
@@ -136,6 +143,33 @@ def clean_public_ip(raw_token: str) -> str | None:
         return None
 
 
+def is_trusted_cdn(ip_str: str) -> bool:
+    """Return True if IP belongs to Cloudflare, CloudFront, or local loopback proxy."""
+    if not ip_str:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        if addr.is_loopback:
+            return True
+        if any(addr in net for net in CF_EDGE_NETS):
+            return True
+        if isinstance(addr, ipaddress.IPv4Address):
+            s = str(addr)
+            if s.startswith((
+                "143.204.", "52.84.", "54.192.", "54.230.", "54.239.", "54.240.",
+                "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.",
+                "13.227.", "13.249.", "18.64.", "18.65.", "18.66.", "18.67.",
+                "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.",
+                "64.252.", "65.8.", "65.9.", "70.132.", "99.84.", "99.86.",
+                "108.138.", "108.156.", "108.157.", "108.158.", "108.159.",
+                "204.246.", "205.251.",
+            )):
+                return True
+        return False
+    except ValueError:
+        return False
+
+
 def device_key_for_ip(ip_str: str) -> str:
     """
     Normalize a client IP to a unique device key:
@@ -144,14 +178,9 @@ def device_key_for_ip(ip_str: str) -> str:
       - Standard public IPv4 maps 1:1 to itself.
     """
     try:
-        addr = ipaddress.ip_address(ip_str)
-        if any(addr in net for net in CF_EDGE_NETS):
+        if is_trusted_cdn(ip_str):
             return "cdn-edge"
-        # Known AWS CloudFront edge prefixes if any direct edge leaked
-        if isinstance(addr, ipaddress.IPv4Address):
-            s_ip = str(addr)
-            if s_ip.startswith(("143.204.", "52.84.", "54.192.", "54.230.", "54.239.", "54.240.", "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.", "13.227.", "13.249.", "18.64.", "18.65.", "18.66.", "18.67.", "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.", "64.252.", "65.8.", "65.9.", "70.132.", "99.84.", "99.86.", "108.138.", "108.156.", "108.157.", "108.158.", "108.159.", "204.246.", "205.251.")):
-                return "cdn-edge"
+        addr = ipaddress.ip_address(ip_str)
         if isinstance(addr, ipaddress.IPv6Address):
             net64 = ipaddress.IPv6Network((addr, 64), strict=False)
             return f"v6:{net64.network_address}/64"
@@ -160,10 +189,11 @@ def device_key_for_ip(ip_str: str) -> str:
         return ip_str
 
 
-def read_recent_nginx_xray_ips(max_age_sec: float = 6.0) -> dict[str, list[str]]:
+def read_recent_nginx_xray_ips(max_age_sec: float = 30.0) -> dict[str, list[str]]:
     """
     Returns proto -> list of recent clean unique client IPs from Nginx handshake log.
-    Only includes handshakes within the last `max_age_sec` seconds!
+    Parses either $msec (float) or $time_iso8601 timestamps.
+    Excludes CDN edges so only real visitor IPs are returned.
     """
     res: dict[str, list[str]] = {}
     if not NGINX_XRAY_LOG.exists():
@@ -179,17 +209,20 @@ def read_recent_nginx_xray_ips(max_age_sec: float = 6.0) -> dict[str, list[str]]
             parts = ln.strip().split()
             if len(parts) < 4:
                 continue
-            # parts[0] is $msec (Unix timestamp with float, e.g. 1730378901.123)
+            log_ts = now_ts
             try:
                 log_ts = float(parts[0])
-                if (now_ts - log_ts) > max_age_sec:
-                    continue
             except ValueError:
-                pass
+                try:
+                    log_ts = dt.datetime.fromisoformat(parts[0]).timestamp()
+                except Exception:
+                    pass
+            if (now_ts - log_ts) > max_age_sec:
+                continue
             raw_ip = parts[1]
             uri = parts[3].lower()
             ip_clean = clean_public_ip(raw_ip)
-            if not ip_clean:
+            if not ip_clean or is_trusted_cdn(ip_clean):
                 continue
             proto = None
             if "vless" in uri or "xhttp" in uri:
@@ -357,31 +390,23 @@ def collect_services_fast() -> list[dict]:
     return res
 
 
-def refresh_auth_pid_cache(canon_users: dict[str, str]):
-    """Scan recent Dropbear & OpenSSH journal entries (-o short-iso keeps PID tags!) to map worker PID -> user."""
-    for dead in [p for p in PID_AUTH_CACHE if not Path(f"/proc/{p}").exists()]:
+def refresh_auth_pid_cache(canon_users: dict[str, str], needed_pids: set[int] | None = None):
+    """Scan Dropbear & OpenSSH logs only when needed to map worker PID -> user."""
+    for dead in [p for p in list(PID_AUTH_CACHE.keys()) if not Path(f"/proc/{p}").exists()]:
         PID_AUTH_CACHE.pop(dead, None)
 
-    lines: list[str] = []
-    try:
-        out = subprocess.check_output(
-            ["journalctl", "-u", "dropbear", "-u", "ssh", "-u", "sshd", "-n", "400", "--no-pager", "-o", "short-iso"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=2.5,
-        )
-        lines.extend(out.splitlines())
-    except Exception:
-        pass
+    if needed_pids is not None and needed_pids.issubset(PID_AUTH_CACHE.keys()):
+        return
 
+    lines: list[str] = []
     auth_log = Path("/var/log/auth.log")
     if auth_log.exists():
         try:
             with auth_log.open("rb") as f:
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
-                f.seek(max(0, sz - 32768))
-                lines.extend(f.read().decode("utf-8", errors="ignore").splitlines()[-250:])
+                f.seek(max(0, sz - 16384))
+                lines.extend(f.read().decode("utf-8", errors="ignore").splitlines()[-100:])
         except Exception:
             pass
 
@@ -401,6 +426,34 @@ def refresh_auth_pid_cache(canon_users: dict[str, str]):
             u_low = m_sh.group(2).lower()
             if u_low in canon_users and Path(f"/proc/{pid}").exists():
                 PID_AUTH_CACHE[pid] = canon_users[u_low]
+
+    # Only run journalctl if needed_pids are still unresolved
+    if needed_pids is not None and not needed_pids.issubset(PID_AUTH_CACHE.keys()):
+        try:
+            out = subprocess.check_output(
+                ["journalctl", "-u", "dropbear", "-u", "ssh", "-u", "sshd", "-n", "40", "--no-pager", "-o", "short-iso"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            )
+            for ln in out.splitlines():
+                m_db = DROPBEAR_AUTH_RE.search(ln)
+                if m_db:
+                    pid_s = m_db.group(1) or m_db.group(2)
+                    if pid_s:
+                        pid = int(pid_s)
+                        u_low = m_db.group(3).lower()
+                        if u_low in canon_users and Path(f"/proc/{pid}").exists():
+                            PID_AUTH_CACHE[pid] = canon_users[u_low]
+                    continue
+                m_sh = SSHD_AUTH_RE.search(ln)
+                if m_sh:
+                    pid = int(m_sh.group(1))
+                    u_low = m_sh.group(2).lower()
+                    if u_low in canon_users and Path(f"/proc/{pid}").exists():
+                        PID_AUTH_CACHE[pid] = canon_users[u_low]
+        except Exception:
+            pass
 
 
 def query_haproxy_sessions() -> tuple[dict[str, str], list[str], list[str], list[str]]:
@@ -634,13 +687,22 @@ def poll_xray_stats_and_ips(
     ws_ips: list[str],
     h2c_ips: list[str],
     trojan_ips: list[str],
-) -> tuple[dict[str, int], dict[str, list[str]], dict[str, int]]:
+) -> tuple[dict[str, int], dict[str, int], dict[str, list[str]], dict[str, int]]:
     """
     Returns:
-      - deltas: uuid -> bytes transferred since last 2s tick
-      - ips_by_uuid: uuid -> sorted clean unique client IPs (1 IP per active connection)
-      - dev_count_by_uuid: uuid -> count of distinct active devices
+      - deltas: uuid -> bytes transferred since last tick
+      - bps_by_uuid: uuid -> smoothed real downloading speed in bytes/sec
+      - ips_by_uuid: uuid -> list of clean real visitor IPs (no Cloudflare/CDN proxy IPs)
+      - dev_count_by_uuid: uuid -> exact count of distinct active users/devices
     """
+    global LAST_XRAY_STATS_TS
+    now_ts = time.time()
+    if LAST_XRAY_STATS_TS is None:
+        elapsed = 2.0
+    else:
+        elapsed = max(0.5, now_ts - LAST_XRAY_STATS_TS)
+    LAST_XRAY_STATS_TS = now_ts
+
     tag_to_uuid: dict[str, str] = {}
     uuid_to_proto: dict[str, str] = {}
     for r in xray_users:
@@ -649,31 +711,46 @@ def poll_xray_stats_and_ips(
         uid = r["uuid"]
         tag_to_uuid[f"{u_low}.{p_low}"] = uid
         tag_to_uuid.setdefault(u_low, uid)
+        tag_to_uuid[uid.lower()] = uid
         uuid_to_proto[uid] = p_low
 
     deltas: dict[str, int] = {}
     if Path("/usr/local/bin/xray").exists():
         try:
             raw = subprocess.check_output(
-                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset"],
+                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset=true"],
                 text=True,
                 stderr=subprocess.DEVNULL,
-                timeout=3.0,
+                timeout=2.0,
             )
             data = json.loads(raw) if raw.strip() else {}
             for st in data.get("stat", []):
                 parts = st.get("name", "").split(">>>")
                 if len(parts) >= 4:
                     tag_low = parts[1].split("@", 1)[0].lower()
-                    uid = tag_to_uuid.get(tag_low)
+                    uid = tag_to_uuid.get(tag_low) or tag_to_uuid.get(tag_low.split(".")[0])
                     if uid:
                         deltas[uid] = deltas.get(uid, 0) + int(st.get("value", 0))
         except Exception:
             pass
 
-    now_ts = time.time()
+    bps_by_uuid: dict[str, int] = {}
+    for uid in set(tag_to_uuid.values()):
+        d = deltas.get(uid, 0)
+        calc_bps = int(d / elapsed) if elapsed > 0 else 0
+        prev_bps = XRAY_BPS.get(uid, 0)
+        if calc_bps > 0:
+            cur_bps = int(0.75 * calc_bps + 0.25 * prev_bps)
+            XRAY_LAST_ACTIVE_TRAFFIC_TS[uid] = now_ts
+        elif (now_ts - XRAY_LAST_ACTIVE_TRAFFIC_TS.get(uid, 0)) < 3.5:
+            cur_bps = int(prev_bps * 0.5)
+        else:
+            cur_bps = 0
+        XRAY_BPS[uid] = cur_bps
+        bps_by_uuid[uid] = cur_bps
+
     proto_socket_counts = scan_active_proto_sockets()
-    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=6.0)
+    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=30.0)
     latest_ip_from_log: dict[str, str] = {}
 
     if XRAY_ACCESS_LOG.exists():
@@ -689,26 +766,31 @@ def poll_xray_stats_and_ips(
                 m_em = XRAY_EMAIL_RE.search(ln)
                 if not m_em:
                     continue
-                uid = tag_to_uuid.get(m_em.group(1).lower())
+                tag_matched = m_em.group(1).lower()
+                uid = tag_to_uuid.get(tag_matched) or tag_to_uuid.get(tag_matched.split(".")[0])
                 if not uid:
                     continue
 
                 proto = uuid_to_proto.get(uid, "vless")
                 ip_clean, was_loop = parse_xray_source_ip(ln)
-                matched_ip = ip_clean
+                matched_ip = ip_clean if (ip_clean and not is_trusted_cdn(ip_clean)) else None
 
                 if was_loop or not matched_ip:
-                    # Connection proxied through Nginx/HAProxy (127.0.0.1 loopback)
                     if proto in nginx_proto_ips and nginx_proto_ips[proto]:
                         matched_ip = nginx_proto_ips[proto][-1]
                     elif proto in ("vless", "vmess") and ws_ips:
-                        matched_ip = ws_ips[0]
+                        for cand in ws_ips:
+                            if not is_trusted_cdn(cand):
+                                matched_ip = cand
+                                break
                     elif proto == "trojan":
-                        matched_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
-                    elif h2c_ips:
-                        matched_ip = h2c_ips[0]
+                        cand_list = trojan_ips or ws_ips
+                        for cand in cand_list:
+                            if not is_trusted_cdn(cand):
+                                matched_ip = cand
+                                break
 
-                if matched_ip:
+                if matched_ip and not is_trusted_cdn(matched_ip):
                     latest_ip_from_log[uid] = matched_ip
         except Exception:
             pass
@@ -729,46 +811,55 @@ def poll_xray_stats_and_ips(
 
         idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
 
-        # ── REAL-TIME DISCONNECT (within 2 seconds) ──
-        # Disconnect triggers immediately when all inbound sockets for this protocol close
-        if active_sockets == 0:
+        # ── REAL-TIME DISCONNECT (within 2 to 4 seconds) ──
+        # Drop immediately when sockets close or no traffic flows after disconnect
+        if active_sockets == 0 or (not active_traffic and uid not in latest_ip_from_log and idle_sec > 10.0):
             dev_map.clear()
             ips_by_uuid[uid] = []
             dev_count_by_uuid[uid] = 0
+            XRAY_BPS[uid] = 0
+            bps_by_uuid[uid] = 0
             continue
 
-        # If user has been completely idle with no traffic or log entry for > 180s, drop
-        if not active_traffic and uid not in latest_ip_from_log and idle_sec > 180.0:
-            dev_map.clear()
-            ips_by_uuid[uid] = []
-            dev_count_by_uuid[uid] = 0
-            continue
-
-        # If data is actively transferring OR user is within active session window:
         best_ip = None
-        if uid in latest_ip_from_log:
+        if uid in latest_ip_from_log and not is_trusted_cdn(latest_ip_from_log[uid]):
             best_ip = latest_ip_from_log[uid]
         elif proto in nginx_proto_ips and nginx_proto_ips[proto]:
-            best_ip = nginx_proto_ips[proto][-1]
-        elif proto in ("vless", "vmess") and ws_ips:
-            best_ip = ws_ips[0]
-        elif proto == "trojan":
-            best_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
-        elif h2c_ips:
-            best_ip = h2c_ips[0]
+            for cand in reversed(nginx_proto_ips[proto]):
+                if not is_trusted_cdn(cand):
+                    best_ip = cand
+                    break
 
-        if best_ip:
+        has_real_ip = any(not is_trusted_cdn(v["ip"]) for v in dev_map.values())
+
+        if best_ip and not is_trusted_cdn(best_ip):
+            # Real visitor IP found: Purge any CDN proxy edge IPs
+            for k in list(dev_map.keys()):
+                if is_trusted_cdn(dev_map[k]["ip"]):
+                    dev_map.pop(k, None)
             dev_map[best_ip] = {"ip": best_ip, "ts": now_ts}
+        elif not has_real_ip and not dev_map:
+            # Fallback only if no real IP has been identified yet
+            fallback_ip = None
+            if proto in ("vless", "vmess") and ws_ips:
+                fallback_ip = ws_ips[0]
+            elif proto == "trojan":
+                fallback_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
+            elif h2c_ips:
+                fallback_ip = h2c_ips[0]
+            if fallback_ip:
+                dev_map[fallback_ip] = {"ip": fallback_ip, "ts": now_ts}
 
-        # Clear devices not seen for > 15 seconds
-        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 15.0]:
+        # Clear devices not seen for > 12s
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 12.0]:
             dev_map.pop(stale_k, None)
 
         online_ips = sorted({v["ip"] for v in dev_map.values()})
         ips_by_uuid[uid] = online_ips
-        dev_count_by_uuid[uid] = min(active_sockets, max(1, len(online_ips)))
+        # Session / user count: 1 client device = 1 user
+        dev_count_by_uuid[uid] = len(online_ips) if online_ips else (1 if (active_traffic or active_sockets > 0) else 0)
 
-    return deltas, ips_by_uuid, dev_count_by_uuid
+    return deltas, bps_by_uuid, ips_by_uuid, dev_count_by_uuid
 
 
 def send_telegram_alert(bot_cfg: dict, message: str):
@@ -793,7 +884,7 @@ def send_telegram_alert(bot_cfg: dict, message: str):
 
 
 def enforce_cycle():
-    global CYCLE_TICK, CACHED_SERVICES
+    global CYCLE_TICK, CACHED_SERVICES, LAST_SSH_STATS_TS
     if not DB_PATH.exists():
         return
 
@@ -812,9 +903,13 @@ def enforce_cycle():
         today = dt.date.today().isoformat()
         managed_ssh = {r["username"] for r in ssh_rows}
         ssh_sessions, ssh_deltas = scan_ssh_sessions(managed_ssh, hap_loop_ips)
-        xray_deltas, xray_ips, xray_fresh_devs = poll_xray_stats_and_ips(xray_rows, ws_ips, h2c_ips, trojan_ips)
+        xray_deltas, xray_bps, xray_ips, xray_fresh_devs = poll_xray_stats_and_ips(xray_rows, ws_ips, h2c_ips, trojan_ips)
 
         # ─── 1. Enforce SSH Quotas, Expiry & Strict User Limit Auto-Disable ───
+        now_mono = time.time()
+        ssh_elapsed = 2.0 if LAST_SSH_STATS_TS is None else max(0.5, now_mono - LAST_SSH_STATS_TS)
+        LAST_SSH_STATS_TS = now_mono
+
         ssh_used_map: dict[str, int] = {}
         for r in ssh_rows:
             uname = r["username"]
@@ -936,7 +1031,7 @@ def enforce_cycle():
     HIST["rx"] = (HIST["rx"] + [round((rx_bps * 8) / 1048576.0, 2)])[-20:]
     HIST["tx"] = (HIST["tx"] + [round((tx_bps * 8) / 1048576.0, 2)])[-20:]
 
-    if not CACHED_SERVICES or (CYCLE_TICK % 2 == 0):
+    if not CACHED_SERVICES or (CYCLE_TICK % 3 == 0):
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
@@ -944,11 +1039,24 @@ def enforce_cycle():
         uname = r["username"]
         conns = ssh_sessions.get(uname, [])
         ips = sorted({c["ip"] for c in conns if c.get("ip")})
+        d_b = int(ssh_deltas.get(uname, 0))
+        calc_sbps = int(d_b / ssh_elapsed) if ssh_elapsed > 0 else 0
+        prev_sb = SSH_BPS.get(uname, 0)
+        if calc_sbps > 0:
+            cur_sb = int(0.75 * calc_sbps + 0.25 * prev_sb)
+            SSH_LAST_ACTIVE_TRAFFIC_TS[uname] = now_mono
+        elif (now_mono - SSH_LAST_ACTIVE_TRAFFIC_TS.get(uname, 0)) < 3.5:
+            cur_sb = int(prev_sb * 0.5)
+        else:
+            cur_sb = 0
+        SSH_BPS[uname] = cur_sb
+
         ssh_live[uname] = {
             "online": len(conns),
             "ips": ips,
             "used_bytes": ssh_used_map.get(uname, int(r["used_bytes"])),
-            "delta": int(ssh_deltas.get(uname, 0)),
+            "delta": d_b,
+            "bps": cur_sb,
         }
 
     xray_live = {}
@@ -961,6 +1069,7 @@ def enforce_cycle():
             "ips": ips,
             "used_bytes": xray_used_map.get(uid, int(r["used_bytes"])),
             "delta": int(xray_deltas.get(uid, 0)),
+            "bps": int(xray_bps.get(uid, 0)),
         }
 
     snapshot = {
@@ -983,12 +1092,20 @@ def enforce_cycle():
 
 
 def main():
+    target = time.monotonic()
     while True:
+        target += 2.0
         try:
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(2.0)
+        now = time.monotonic()
+        sleep_sec = target - now
+        if sleep_sec < 0.05:
+            target = time.monotonic()
+            time.sleep(0.3)
+        else:
+            time.sleep(sleep_sec)
 
 
 if __name__ == "__main__":

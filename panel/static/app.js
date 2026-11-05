@@ -520,13 +520,21 @@
     if (!useDemo) {
       const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
       if (csrfToken && opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
-      const res = await fetch('/api' + path, {
-        method: opts.method || 'GET',
-        headers,
-        cache: 'no-store',
-        body: opts.body ? JSON.stringify(opts.body) : undefined,
-        credentials: 'same-origin'
-      });
+      const ctrl = new AbortController();
+      const tId = setTimeout(() => ctrl.abort(), opts.timeout || 4000);
+      let res;
+      try {
+        res = await fetch('/api' + path, {
+          method: opts.method || 'GET',
+          headers,
+          cache: 'no-store',
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
+          credentials: 'same-origin',
+          signal: ctrl.signal
+        });
+      } finally {
+        clearTimeout(tId);
+      }
       if (res.status === 401 && path !== '/auth/login') {
         showLogin();
         const uerr = new Error('Session expired');
@@ -1000,8 +1008,9 @@
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
-        const rateHtml = (!isDis && onlineCnt > 0 && (u.delta || 0) > 0)
-          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate((u.delta || 0) / 2)}</span>`
+        const curBps = (u.bps !== undefined && u.bps > 0) ? u.bps : Math.round((u.delta || 0) / 2);
+        const rateHtml = (!isDis && onlineCnt > 0)
+          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate(curBps)}</span>`
           : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
@@ -1238,8 +1247,9 @@
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
         const wsPath = `/alyan-${u.proto}`;
-        const rateHtml = (!isDis && onlineCnt > 0 && (u.delta || 0) > 0)
-          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate((u.delta || 0) / 2)}</span>`
+        const curBps = (u.bps !== undefined && u.bps > 0) ? u.bps : Math.round((u.delta || 0) / 2);
+        const rateHtml = (!isDis && onlineCnt > 0)
+          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate(curBps)}</span>`
           : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">

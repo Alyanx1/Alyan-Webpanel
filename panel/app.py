@@ -31,9 +31,9 @@ LOGIN_FAILURES: dict[str, list[float]] = {}
 MAX_FAILURES = 8
 FAIL_WINDOW = 300.0
 
-# Lightweight read coalescing cache (1.2s TTL, cleared immediately on any mutation)
+# Lightweight read coalescing cache (0.8s TTL, cleared immediately on any mutation)
 READ_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-READ_CACHE_TTL = 1.2
+READ_CACHE_TTL = 0.8
 
 
 def load_or_create_secret() -> bytes:
@@ -115,6 +115,11 @@ async def run_ctl(
         )
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
         raise HTTPException(status_code=504, detail="Control engine operation timed out")
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="alyan-ctl binary not installed")
