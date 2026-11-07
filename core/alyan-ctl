@@ -855,7 +855,7 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
     }
 
     snap_svcs = snap.get("services")
-    snap_fresh = (time.time() - float(snap.get("ts", 0))) < 10.0
+    snap_fresh = (time.time() - float(snap.get("updated_at") or snap.get("ts") or 0)) < 10.0
     svcs = snap_svcs if (isinstance(snap_svcs, list) and snap_svcs and snap_fresh) else collect_services()
 
     return {

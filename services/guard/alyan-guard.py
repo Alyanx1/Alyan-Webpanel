@@ -45,6 +45,7 @@ CF_EDGE_NETS = [
         "103.22.200.0/22",
         "103.31.4.0/22",
         "141.101.64.0/18",
+        "141.193.213.0/24",
         "108.162.192.0/18",
         "190.93.240.0/20",
         "188.114.96.0/20",
@@ -104,6 +105,7 @@ XRAY_FROM_RAW_RE = re.compile(
     r"(?:\bfrom\s+)?(?:tcp:|udp:)?(\[[0-9a-fA-F:]+\]:[0-9]+|[0-9a-fA-F\.:]+:[0-9]+|[0-9\.]+)\s+accepted\b",
     re.IGNORECASE,
 )
+XRAY_LOG_TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(?:\.\d+)?")
 NGINX_XRAY_LOG = Path("/var/log/nginx/alyan-xray.log")
 
 
@@ -176,7 +178,7 @@ def device_key_for_ip(ip_str: str) -> str:
     Normalize a client IP to a unique device key:
       - Unwrapped Cloudflare or CloudFront edge IPs collapse to 'cdn-edge' so PoP rotation never fakes 30 IPs.
       - IPv6 SLAAC privacy extensions collapse to their /64 subscriber prefix so 1 mobile phone = 1 device.
-      - Standard public IPv4 maps 1:1 to itself.
+      - IPv4 collapses to its /24 carrier CGNAT subnet so parallel WebSocket streams from 1 mobile SIM = 1 device.
     """
     try:
         if is_trusted_cdn(ip_str):
@@ -185,9 +187,21 @@ def device_key_for_ip(ip_str: str) -> str:
         if isinstance(addr, ipaddress.IPv6Address):
             net64 = ipaddress.IPv6Network((addr, 64), strict=False)
             return f"v6:{net64.network_address}/64"
-        return str(addr)
+        net24 = ipaddress.IPv4Network((addr, 24), strict=False)
+        return f"v4:{net24.network_address}/24"
     except ValueError:
         return ip_str
+
+
+def parse_xray_log_ts(line: str) -> float | None:
+    """Parse YYYY/MM/DD HH:MM:SS timestamp at the start of an Xray access.log line."""
+    m = XRAY_LOG_TS_RE.match(line.strip())
+    if not m:
+        return None
+    try:
+        return dt.datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S").timestamp()
+    except Exception:
+        return None
 
 
 def read_recent_nginx_xray_ips(max_age_sec: float = 30.0) -> dict[str, list[str]]:
@@ -738,11 +752,14 @@ def poll_xray_stats_and_ips(
         uuid_to_proto[uid] = p_low
 
     deltas: dict[str, int] = {}
+    online_map_ips_by_uid: dict[str, list[str]] = {}
+    fresh_online_ips_by_uid: dict[str, list[str]] = {}
+
     if Path("/usr/local/bin/xray").exists():
         try:
-            # Query stats WITHOUT -reset=true so Xray counters are monotonic and never falsely double-counted
+            # Query exact 2s byte delta atomically from Xray stats counters with -reset
             raw = subprocess.check_output(
-                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>"],
+                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset"],
                 text=True,
                 stderr=subprocess.DEVNULL,
                 timeout=2.0,
@@ -751,25 +768,42 @@ def poll_xray_stats_and_ips(
             for st in data.get("stat", []):
                 st_name = st.get("name", "")
                 parts = st_name.split(">>>")
-                if len(parts) >= 4:
+                if len(parts) >= 4 and parts[2] == "traffic":
                     tag_low = parts[1].split("@", 1)[0].lower()
                     uid = tag_to_uuid.get(tag_low) or tag_to_uuid.get(tag_low.split(".")[0])
                     if uid:
-                        cur_val = int(st.get("value", 0))
-                        if st_name not in XRAY_STAT_LAST_VAL:
-                            # First time observing this stat: establish baseline, delta is 0
-                            XRAY_STAT_LAST_VAL[st_name] = cur_val
-                            delta = 0
-                        else:
-                            prev_val = XRAY_STAT_LAST_VAL[st_name]
-                            if cur_val >= prev_val:
-                                delta = cur_val - prev_val
-                            else:
-                                # Counter wrapped or Xray daemon restarted
-                                delta = cur_val
-                            XRAY_STAT_LAST_VAL[st_name] = cur_val
+                        delta = int(st.get("value", 0))
                         if delta > 0:
                             deltas[uid] = deltas.get(uid, 0) + delta
+        except Exception:
+            pass
+
+        try:
+            # Query Xray's live ref-counted OnlineMap (statsUserOnline)
+            raw_om = subprocess.check_output(
+                ["/usr/local/bin/xray", "api", "statsonlineiplist", "--server=127.0.0.1:10085", "-all"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+            om_data = json.loads(raw_om) if raw_om.strip() else {}
+            for u_obj in om_data.get("users", []) or []:
+                em_low = (u_obj.get("email") or "").split("@", 1)[0].lower()
+                uid = tag_to_uuid.get(em_low) or tag_to_uuid.get(em_low.split(".")[0])
+                if not uid:
+                    continue
+                for ip_ent in u_obj.get("ips", []) or []:
+                    ip_clean = clean_public_ip(str(ip_ent.get("ip") or ""))
+                    if not ip_clean or is_trusted_cdn(ip_clean):
+                        continue
+                    last_seen = float(ip_ent.get("lastSeen") or 0)
+                    om_list = online_map_ips_by_uid.setdefault(uid, [])
+                    if ip_clean not in om_list:
+                        om_list.append(ip_clean)
+                    if (now_ts - last_seen) <= 3.0:
+                        fr_list = fresh_online_ips_by_uid.setdefault(uid, [])
+                        if ip_clean not in fr_list:
+                            fr_list.append(ip_clean)
         except Exception:
             pass
 
@@ -789,8 +823,8 @@ def poll_xray_stats_and_ips(
         bps_by_uuid[uid] = cur_bps
 
     proto_socket_counts = scan_active_proto_sockets()
-    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=30.0)
-    latest_ip_from_log: dict[str, str] = {}
+    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=3.0)
+    recent_accept_ips: dict[str, list[str]] = {}
 
     if XRAY_ACCESS_LOG.exists():
         try:
@@ -801,6 +835,10 @@ def poll_xray_stats_and_ips(
                 tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-100:]
             for ln in tail_lines:
                 if "accepted" not in ln or "email:" not in ln:
+                    continue
+                log_ts = parse_xray_log_ts(ln)
+                # Ignore historical access.log lines older than 3 seconds
+                if log_ts is None or (now_ts - log_ts) > 3.0 or (now_ts - log_ts) < -5.0:
                     continue
                 m_em = XRAY_EMAIL_RE.search(ln)
                 if not m_em:
@@ -814,23 +852,13 @@ def poll_xray_stats_and_ips(
                 ip_clean, was_loop = parse_xray_source_ip(ln)
                 matched_ip = ip_clean if (ip_clean and not is_trusted_cdn(ip_clean)) else None
 
-                if was_loop or not matched_ip:
-                    if proto in nginx_proto_ips and nginx_proto_ips[proto]:
-                        matched_ip = nginx_proto_ips[proto][-1]
-                    elif proto in ("vless", "vmess") and ws_ips:
-                        for cand in ws_ips:
-                            if not is_trusted_cdn(cand):
-                                matched_ip = cand
-                                break
-                    elif proto == "trojan":
-                        cand_list = trojan_ips or ws_ips
-                        for cand in cand_list:
-                            if not is_trusted_cdn(cand):
-                                matched_ip = cand
-                                break
+                if (was_loop or not matched_ip) and proto in nginx_proto_ips and nginx_proto_ips[proto]:
+                    matched_ip = nginx_proto_ips[proto][-1]
 
                 if matched_ip and not is_trusted_cdn(matched_ip):
-                    latest_ip_from_log[uid] = matched_ip
+                    ac_list = recent_accept_ips.setdefault(uid, [])
+                    if matched_ip not in ac_list:
+                        ac_list.append(matched_ip)
         except Exception:
             pass
 
@@ -845,14 +873,19 @@ def poll_xray_stats_and_ips(
         active_traffic = user_traffic > 0
         active_sockets = proto_socket_counts.get(proto, 0)
 
-        if active_traffic or uid in latest_ip_from_log:
+        om_all_ips = online_map_ips_by_uid.get(uid, [])
+        om_fresh_ips = fresh_online_ips_by_uid.get(uid, [])
+        log_fresh_ips = recent_accept_ips.get(uid, [])
+
+        recently_active = active_traffic or bool(om_fresh_ips) or bool(log_fresh_ips)
+        if recently_active:
             XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
         idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
 
-        # ── REAL-TIME DISCONNECT (within 2 seconds) ──
-        # Drop immediately when sockets close or no traffic flows after disconnect
-        if active_sockets == 0 or (not active_traffic and uid not in latest_ip_from_log and idle_sec > 6.0):
+        # ── INSTANT 2-SECOND DISCONNECT ──
+        # Immediately go offline within 2s when sockets close or user stops traffic/streams
+        if active_sockets == 0 or (not recently_active and idle_sec > 2.2):
             dev_map.clear()
             ips_by_uuid[uid] = []
             dev_count_by_uuid[uid] = 0
@@ -860,54 +893,64 @@ def poll_xray_stats_and_ips(
             bps_by_uuid[uid] = 0
             continue
 
-        best_ip = None
-        if uid in latest_ip_from_log and not is_trusted_cdn(latest_ip_from_log[uid]):
-            best_ip = latest_ip_from_log[uid]
-        elif proto in nginx_proto_ips and nginx_proto_ips[proto]:
-            for cand in reversed(nginx_proto_ips[proto]):
+        # Purge any CDN edge entries from dev_map
+        for k in list(dev_map.keys()):
+            if k == "cdn-edge" or is_trusted_cdn(dev_map[k]["ip"]):
+                dev_map.pop(k, None)
+
+        cand_ips: list[str] = []
+        for ip_c in log_fresh_ips + om_fresh_ips + om_all_ips:
+            if ip_c and not is_trusted_cdn(ip_c) and ip_c not in cand_ips:
+                cand_ips.append(ip_c)
+
+        if cand_ips:
+            for ip_c in cand_ips:
+                dkey = device_key_for_ip(ip_c)
+                if dkey != "cdn-edge":
+                    dev_map[dkey] = {"ip": ip_c, "ts": now_ts}
+        elif active_traffic and dev_map:
+            # Keep existing verified device IP alive during continuous single-stream download
+            for v in dev_map.values():
+                v["ts"] = now_ts
+        elif not dev_map and proto == "trojan" and trojan_ips:
+            # Direct TCP Trojan fallback (non-CDN only)
+            for cand in trojan_ips:
                 if not is_trusted_cdn(cand):
-                    best_ip = cand
-                    break
+                    dkey = device_key_for_ip(cand)
+                    if dkey != "cdn-edge":
+                        dev_map[dkey] = {"ip": cand, "ts": now_ts}
+                        break
 
-        has_real_ip = any(not is_trusted_cdn(v["ip"]) for v in dev_map.values())
-
-        if best_ip and not is_trusted_cdn(best_ip):
-            # Real visitor IP found: Purge any CDN proxy edge IPs
-            for k in list(dev_map.keys()):
-                if is_trusted_cdn(dev_map[k]["ip"]):
-                    dev_map.pop(k, None)
-            dev_map[best_ip] = {"ip": best_ip, "ts": now_ts}
-        elif not has_real_ip and not dev_map:
-            # Fallback only if no real IP has been identified yet
-            fallback_ip = None
-            if proto in ("vless", "vmess") and ws_ips:
-                fallback_ip = ws_ips[0]
-            elif proto == "trojan":
-                fallback_ip = trojan_ips[0] if trojan_ips else (ws_ips[0] if ws_ips else None)
-            elif h2c_ips:
-                fallback_ip = h2c_ips[0]
-            if fallback_ip:
-                dev_map[fallback_ip] = {"ip": fallback_ip, "ts": now_ts}
-
-        # Clear devices not seen for > 8s
-        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 8.0]:
+        # Expire inactive devices after 2.5 seconds
+        for stale_k in [k for k, v in dev_map.items() if (now_ts - v["ts"]) > 2.5]:
             dev_map.pop(stale_k, None)
 
-        # Strictly cap dev_map to active_sockets count (prevent phantom multi-IP accumulation)
+        # If a single dual-stack mobile phone connects over both IPv4 and IPv6 simultaneously
+        # (Happy Eyeballs over Cloudflare), collapse IPv6 so 1 phone = 1 IP and 1 Live User
+        has_v4 = any(k.startswith("v4:") for k in dev_map)
+        has_v6 = any(k.startswith("v6:") for k in dev_map)
+        if has_v4 and has_v6:
+            for k in [k for k in dev_map if k.startswith("v6:")]:
+                dev_map.pop(k, None)
+
+        # Strictly cap dev_map to active_sockets count
         max_allowed = max(1, active_sockets)
         if len(dev_map) > max_allowed:
             sorted_items = sorted(dev_map.items(), key=lambda kv: kv[1]["ts"], reverse=True)
             for stale_key, _ in sorted_items[max_allowed:]:
                 dev_map.pop(stale_key, None)
 
-        # User sessions strictly bounded by active sockets:
-        # If 1 socket is open, user_sessions is AT MOST 1. It can NEVER be 2!
-        user_sessions = min(active_sockets, max(1 if (active_traffic or active_sockets > 0) else 0, len(dev_map)))
-        dev_count_by_uuid[uid] = user_sessions
+        # User sessions strictly bounded by distinct device keys and active sockets
+        if dev_map:
+            user_sessions = min(active_sockets, len(dev_map))
+        elif recently_active and active_sockets > 0:
+            user_sessions = 1
+        else:
+            user_sessions = 0
 
-        # Keep only the freshest user_sessions IPs
+        dev_count_by_uuid[uid] = user_sessions
         fresh_sorted_ips = [v["ip"] for v in sorted(dev_map.values(), key=lambda x: x["ts"], reverse=True)]
-        ips_by_uuid[uid] = fresh_sorted_ips[:user_sessions] if fresh_sorted_ips else ([best_ip] if best_ip and user_sessions > 0 else [])
+        ips_by_uuid[uid] = fresh_sorted_ips[:user_sessions]
 
     return deltas, bps_by_uuid, ips_by_uuid, dev_count_by_uuid
 
@@ -1142,6 +1185,16 @@ def enforce_cycle():
 
 
 def main():
+    if Path("/usr/local/bin/xray").exists():
+        try:
+            subprocess.run(
+                ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+        except Exception:
+            pass
     target = time.monotonic()
     while True:
         target += 2.0

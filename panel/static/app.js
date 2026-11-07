@@ -324,8 +324,10 @@
     const u = ['KB', 'MB', 'GB', 'TB'];
     let i = -1, v = n;
     do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
-    if (highPrecision && i === 2) {
-      return (v < 100 ? v.toFixed(3) : v.toFixed(2)) + ' GB';
+    if (highPrecision) {
+      if (i === 0) return v.toFixed(1) + ' KB';
+      if (i === 1) return v.toFixed(2) + ' MB';
+      return v.toFixed(4) + ' ' + u[i];
     }
     return (v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + u[i];
   };
@@ -654,7 +656,7 @@
   }
 
   /* ─── UI Shell & Helpers ─── */
-  const STATE = { bay: 'core', me: null, cfg: null, xrayProto: 'vless', searchSsh: '', searchXray: '', searchAudit: '', timer: null };
+  const STATE = { bay: sessionStorage.getItem('alyan_bay') || 'core', navSeq: 0, me: null, cfg: null, xrayProto: 'vless', searchSsh: '', searchXray: '', searchAudit: '', timer: null };
 
   function toast(msg, kind = 'ok') {
     const el = document.createElement('div');
@@ -732,7 +734,10 @@
 
   function go(bay) {
     STATE.bay = bay;
+    STATE.navSeq = (STATE.navSeq || 0) + 1;
+    try { sessionStorage.setItem('alyan_bay', bay); } catch {}
     clearInterval(STATE.timer);
+    STATE.timer = null;
     toggleMobileSidebar(false);
     $$('#sbNav .sb-item[data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === bay));
     ({
@@ -750,6 +755,7 @@
 
   /* ═════════════════════ 1. CORE (Flame Launcher + Centered % Core) ═════════════════════ */
   async function renderCore() {
+    const mySeq = STATE.navSeq;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'COMMAND DECK · LIVE TELEMETRY',
@@ -766,13 +772,14 @@
     if (!isViewer && $('#launcherFire')) {
       attachRealFire($('#launcherFire'), { w: 56, h: 32, cool: 4.1 });
     }
-    $('#btnCoreRefresh').onclick = () => renderCore();
+    $('#btnCoreRefresh').onclick = () => go('core');
     if (!isViewer && $('#btnFlameLauncher')) {
       $('#btnFlameLauncher').onclick = openQuickSheet;
     }
 
     const draw = async () => {
       const d = await api('/overview');
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'core') return;
       STATE.cfg = d.cfg; syncHud();
       const ring = (r, pct, color) => {
         const c = 2 * Math.PI * r;
@@ -911,8 +918,10 @@
     };
     let coreBusy = false;
     await draw();
+    if (STATE.navSeq !== mySeq || STATE.bay !== 'core') return;
+    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
       coreBusy = true;
       try { await draw(); } catch {} finally { coreBusy = false; }
     }, 2000);
@@ -920,6 +929,7 @@
 
   /* ═════════════════════ 2. SSH ACCOUNTS (6-Corner SVG + 2s Real-Time Sync) ═════════════════════ */
   async function renderTunnels() {
+    const mySeq = STATE.navSeq;
     let items = [];
     let sshBusy = false;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
@@ -929,6 +939,7 @@
       : `<div class="empty"><p>No active SSH-WS, SSL or Dropbear sessions right now.</p></div>`;
 
     const initData = await api('/ssh');
+    if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels') return;
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
@@ -1071,11 +1082,13 @@
     $('#sshSearch').oninput = (e) => { STATE.searchSsh = e.target.value; paintCards(); };
     paintCards();
 
+    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'tunnels' || document.hidden || sshBusy || $('.acc.is-disintegrating')) return;
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels' || document.hidden || sshBusy || $('.acc.is-disintegrating')) return;
       sshBusy = true;
       try {
         const res = await api('/ssh');
+        if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels') return;
         items = res.items || [];
         STATE.cfg = res.cfg;
         paintCards();
@@ -1137,14 +1150,15 @@
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
       try {
-        if (existing) { await api(`/ssh/${encodeURIComponent(existing.username)}`, { method: 'PATCH', body: fd }); toast(`Updated ${existing.username}`); closeSheet(); renderTunnels(); }
-        else { const r = await api('/ssh', { method: 'POST', body: fd }); toast(`Created ${r.item.username}`); renderTunnels(); showSshTicket(r.item); }
+        if (existing) { await api(`/ssh/${encodeURIComponent(existing.username)}`, { method: 'PATCH', body: fd }); toast(`Updated ${existing.username}`); closeSheet(); go('tunnels'); }
+        else { const r = await api('/ssh', { method: 'POST', body: fd }); toast(`Created ${r.item.username}`); go('tunnels'); showSshTicket(r.item); }
       } catch (err) { toast(err.message, 'err'); }
     };
   }
 
   /* ═════════════════════ 3. XRAY (6-Corner SVG Hexagon + 2s Real-Time Sync) ═════════════════════ */
   async function renderXray() {
+    const mySeq = STATE.navSeq;
     let items = [];
     let xrayBusy = false;
     const protos = ['vless', 'vmess', 'trojan'];
@@ -1155,6 +1169,7 @@
       : `<div class="empty"><p>No active VLESS, VMess or Trojan sessions right now.</p></div>`;
 
     const initData = await api('/xray');
+    if (STATE.navSeq !== mySeq || STATE.bay !== 'xray') return;
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
@@ -1329,11 +1344,13 @@
     $('#xraySearch').oninput = (e) => { STATE.searchXray = e.target.value; paintXrayCards(); };
     paintXrayCards();
 
+    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
       xrayBusy = true;
       try {
         const res = await api('/xray');
+        if (STATE.navSeq !== mySeq || STATE.bay !== 'xray') return;
         items = res.items || [];
         STATE.cfg = res.cfg;
         paintXrayCards();
@@ -1399,12 +1416,12 @@
           STATE.xrayProto = r.item.proto;
           toast(`Updated ${r.item.username}`);
           closeSheet();
-          renderXray();
+          go('xray');
         } else {
           const r = await api('/xray', { method: 'POST', body: fd });
           STATE.xrayProto = r.item.proto;
           toast(`Created ${r.item.username}`);
-          renderXray();
+          go('xray');
           showXrayLinks(r.item);
         }
       } catch (err) { toast(err.message, 'err'); }
@@ -1414,6 +1431,7 @@
 
   /* ═════════════════════ 4. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
   async function renderEngine() {
+    const mySeq = STATE.navSeq;
     let engBusy = false;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
@@ -1427,6 +1445,7 @@
 
     const drawEngine = async () => {
       const { services, ports } = await api('/engine');
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'engine') return;
       const pubPorts = (ports || []).filter(p => p.scope === 'public');
       const locPorts = (ports || []).filter(p => p.scope !== 'public');
 
@@ -1520,8 +1539,10 @@
       };
     }
     await drawEngine();
+    if (STATE.navSeq !== mySeq || STATE.bay !== 'engine') return;
+    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'engine' || document.hidden || engBusy) return;
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'engine' || document.hidden || engBusy) return;
       engBusy = true;
       try { await drawEngine(); } catch {} finally { engBusy = false; }
     }, 2000);
@@ -1529,6 +1550,7 @@
 
   /* ═════════════════════ 5. VPS INFO (Hardware, Wire-Speed Throughput & Load · 2s Sync) ═════════════════════ */
   async function renderTelemetry() {
+    const mySeq = STATE.navSeq;
     let telBusy = false;
     setBayHead(
       'SERVER SPECS & LIVE TRAFFIC',
@@ -1538,6 +1560,7 @@
 
     const drawTel = async () => {
       const d = await api('/telemetry');
+      if (STATE.navSeq !== mySeq || STATE.bay !== 'telemetry') return;
       STATE.cfg = d.cfg; syncHud();
       const spCpu = sparkPath(d.hist.cpu, 540, 175, 100);
       const spRam = sparkPath(d.hist.ram, 540, 175, 100);
@@ -1895,7 +1918,9 @@
 
   /* ═════════════════════ 9. LIST (Activity & Event List · 2s Sync) ═════════════════════ */
   async function renderAudit() {
+    const mySeq = STATE.navSeq;
     let items = (await api('/audit')).items || [];
+    if (STATE.navSeq !== mySeq || STATE.bay !== 'audit') return;
     let auditBusy = false;
     setBayHead(
       'ACTIVITY STREAM',

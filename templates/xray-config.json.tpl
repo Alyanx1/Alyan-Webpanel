@@ -16,12 +16,13 @@
   "policy": {
     "levels": {
       "0": {
-        "handshake": 6,
-        "connIdle": 600,
-        "uplinkOnly": 2,
-        "downlinkOnly": 5,
+        "handshake": 4,
+        "connIdle": 6,
+        "uplinkOnly": 1,
+        "downlinkOnly": 1,
         "statsUserUplink": true,
         "statsUserDownlink": true,
+        "statsUserOnline": true,
         "bufferSize": 4096
       }
     },
@@ -54,11 +55,12 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless"
+          "path": "/alyan-vless",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -73,11 +75,12 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess"
+          "path": "/alyan-vmess",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -92,11 +95,12 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan"
+          "path": "/alyan-trojan",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -116,7 +120,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -135,7 +139,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -154,7 +158,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -192,7 +196,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     }
