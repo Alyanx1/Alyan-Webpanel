@@ -7,16 +7,28 @@
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+INSTALL_DIR="/opt/alyan"
 REPO_RAW="https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main"
 TS="$(date +%s)"
 
+mkdir -p "${INSTALL_DIR}/templates" "${INSTALL_DIR}/services/guard" "${INSTALL_DIR}/core" "${INSTALL_DIR}/panel/static"
+
 echo -e "\033[38;5;208m[1/4]\033[0m Downloading VLESS / Xray precision update from GitHub..."
-curl -fsSL "${REPO_RAW}/templates/xray-config.json.tpl?t=${TS}" -o /opt/alyan-panel/templates/xray-config.json.tpl
-curl -fsSL "${REPO_RAW}/services/guard/alyan-guard.py?t=${TS}" -o /opt/alyan-panel/services/guard/alyan-guard.py
-curl -fsSL "${REPO_RAW}/core/alyan-ctl?t=${TS}" -o /opt/alyan-panel/core/alyan-ctl
-cp -f /opt/alyan-panel/core/alyan-ctl /usr/local/bin/alyan-ctl
-chmod +x /opt/alyan-panel/core/alyan-ctl /usr/local/bin/alyan-ctl /opt/alyan-panel/services/guard/alyan-guard.py
-curl -fsSL "${REPO_RAW}/panel/static/app.js?t=${TS}" -o /opt/alyan-panel/panel/static/app.js
+curl -fsSL "${REPO_RAW}/templates/xray-config.json.tpl?t=${TS}" -o "${INSTALL_DIR}/templates/xray-config.json.tpl"
+curl -fsSL "${REPO_RAW}/services/guard/alyan-guard.py?t=${TS}" -o "${INSTALL_DIR}/services/guard/alyan-guard.py"
+curl -fsSL "${REPO_RAW}/core/alyan-ctl?t=${TS}" -o "${INSTALL_DIR}/core/alyan-ctl"
+curl -fsSL "${REPO_RAW}/panel/static/app.js?t=${TS}" -o "${INSTALL_DIR}/panel/static/app.js"
+
+for f in \
+  "${INSTALL_DIR}/templates/xray-config.json.tpl" \
+  "${INSTALL_DIR}/services/guard/alyan-guard.py" \
+  "${INSTALL_DIR}/core/alyan-ctl" \
+  "${INSTALL_DIR}/panel/static/app.js"; do
+  sed -i 's/\r$//' "$f" 2>/dev/null || true
+done
+
+chmod +x "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/services/guard/alyan-guard.py"
+ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
 
 echo -e "\033[38;5;208m[2/4]\033[0m Clearing stale Xray access logs & live cache..."
 : > /var/log/xray/access.log 2>/dev/null || true
