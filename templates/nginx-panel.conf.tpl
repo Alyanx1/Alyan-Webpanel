@@ -24,7 +24,7 @@ server {
     gzip_min_length 512;
 
     # Redirect plain HTTP sent to HTTPS port automatically cleanly
-    error_page 497 301 https://$http_host$request_uri;
+    error_page 497 https://$host:{{PANEL_PORT}}$request_uri;
 
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
@@ -41,8 +41,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Connection "";
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 120s;
         proxy_read_timeout 120s;
     }
 }

@@ -318,17 +318,12 @@
   }
 
   /* ─── Formatting & QR Helpers ─── */
-  const fmtBytes = (b, highPrecision = false) => {
+  const fmtBytes = (b) => {
     const n = Math.max(0, Number(b) || 0);
     if (n < 1024) return Math.round(n) + ' B';
     const u = ['KB', 'MB', 'GB', 'TB'];
     let i = -1, v = n;
     do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
-    if (highPrecision) {
-      if (i === 0) return v.toFixed(1) + ' KB';
-      if (i === 1) return v.toFixed(2) + ' MB';
-      return v.toFixed(4) + ' ' + u[i];
-    }
     return (v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + u[i];
   };
   const fmtRate = (bps) => fmtBytes(bps) + '/s';
@@ -522,21 +517,13 @@
     if (!useDemo) {
       const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
       if (csrfToken && opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = csrfToken;
-      const ctrl = new AbortController();
-      const tId = setTimeout(() => ctrl.abort(), opts.timeout || 4000);
-      let res;
-      try {
-        res = await fetch('/api' + path, {
-          method: opts.method || 'GET',
-          headers,
-          cache: 'no-store',
-          body: opts.body ? JSON.stringify(opts.body) : undefined,
-          credentials: 'same-origin',
-          signal: ctrl.signal
-        });
-      } finally {
-        clearTimeout(tId);
-      }
+      const res = await fetch('/api' + path, {
+        method: opts.method || 'GET',
+        headers,
+        cache: 'no-store',
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+        credentials: 'same-origin'
+      });
       if (res.status === 401 && path !== '/auth/login') {
         showLogin();
         const uerr = new Error('Session expired');
@@ -656,7 +643,7 @@
   }
 
   /* ─── UI Shell & Helpers ─── */
-  const STATE = { bay: sessionStorage.getItem('alyan_bay') || 'core', navSeq: 0, me: null, cfg: null, xrayProto: 'vless', searchSsh: '', searchXray: '', searchAudit: '', timer: null };
+  const STATE = { bay: 'core', me: null, cfg: null, xrayProto: 'vless', searchSsh: '', searchXray: '', searchAudit: '', timer: null };
 
   function toast(msg, kind = 'ok') {
     const el = document.createElement('div');
@@ -734,10 +721,7 @@
 
   function go(bay) {
     STATE.bay = bay;
-    STATE.navSeq = (STATE.navSeq || 0) + 1;
-    try { sessionStorage.setItem('alyan_bay', bay); } catch {}
     clearInterval(STATE.timer);
-    STATE.timer = null;
     toggleMobileSidebar(false);
     $$('#sbNav .sb-item[data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === bay));
     ({
@@ -755,7 +739,6 @@
 
   /* ═════════════════════ 1. CORE (Flame Launcher + Centered % Core) ═════════════════════ */
   async function renderCore() {
-    const mySeq = STATE.navSeq;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'COMMAND DECK · LIVE TELEMETRY',
@@ -772,14 +755,13 @@
     if (!isViewer && $('#launcherFire')) {
       attachRealFire($('#launcherFire'), { w: 56, h: 32, cool: 4.1 });
     }
-    $('#btnCoreRefresh').onclick = () => go('core');
+    $('#btnCoreRefresh').onclick = () => renderCore();
     if (!isViewer && $('#btnFlameLauncher')) {
       $('#btnFlameLauncher').onclick = openQuickSheet;
     }
 
     const draw = async () => {
       const d = await api('/overview');
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'core') return;
       STATE.cfg = d.cfg; syncHud();
       const ring = (r, pct, color) => {
         const c = 2 * Math.PI * r;
@@ -918,10 +900,8 @@
     };
     let coreBusy = false;
     await draw();
-    if (STATE.navSeq !== mySeq || STATE.bay !== 'core') return;
-    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
+      if (STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
       coreBusy = true;
       try { await draw(); } catch {} finally { coreBusy = false; }
     }, 2000);
@@ -929,7 +909,6 @@
 
   /* ═════════════════════ 2. SSH ACCOUNTS (6-Corner SVG + 2s Real-Time Sync) ═════════════════════ */
   async function renderTunnels() {
-    const mySeq = STATE.navSeq;
     let items = [];
     let sshBusy = false;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
@@ -939,18 +918,16 @@
       : `<div class="empty"><p>No active SSH-WS, SSL or Dropbear sessions right now.</p></div>`;
 
     const initData = await api('/ssh');
-    if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels') return;
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
-    const getOnlineCount = (u) => (u.status === 'disabled' ? 0 : (u.online || 0));
     const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, ip })));
-    const getLiveUsersTotal = () => items.reduce((acc, u) => acc + getOnlineCount(u), 0);
+    const getLiveUsersTotal = () => items.reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
     const getLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && getOnlineCount(u) > 0)
+      .filter(u => u.status !== 'disabled' && (u.online > 0 || (u.ips && u.ips.length > 0)))
       .map(u => ({
         user: u.username,
-        online: getOnlineCount(u),
+        online: u.online || (u.ips || []).length || 0,
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -1015,14 +992,11 @@
             </div>
           </article>`;
         }
-        const onlineCnt = getOnlineCount(u);
+        const ipList = isDis ? [] : (u.ips || []);
+        const onlineCnt = isDis ? 0 : (u.online || ipList.length || 0);
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
-        const curBps = (u.bps !== undefined && u.bps > 0) ? u.bps : Math.round((u.delta || 0) / 2);
-        const rateHtml = (!isDis && onlineCnt > 0)
-          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate(curBps)}</span>`
-          : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
@@ -1033,7 +1007,7 @@
             </div>
           </div>
           <div class="meter">
-            <div class="meter-h"><span>DATA QUOTA${rateHtml}</span><b>${fmtBytes(u.used_bytes, true)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+            <div class="meter-h"><span>DATA QUOTA</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats cols2">
@@ -1082,13 +1056,11 @@
     $('#sshSearch').oninput = (e) => { STATE.searchSsh = e.target.value; paintCards(); };
     paintCards();
 
-    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels' || document.hidden || sshBusy || $('.acc.is-disintegrating')) return;
+      if (STATE.bay !== 'tunnels' || document.hidden || sshBusy || $('.acc.is-disintegrating')) return;
       sshBusy = true;
       try {
         const res = await api('/ssh');
-        if (STATE.navSeq !== mySeq || STATE.bay !== 'tunnels') return;
         items = res.items || [];
         STATE.cfg = res.cfg;
         paintCards();
@@ -1150,15 +1122,14 @@
       e.preventDefault();
       const fd = Object.fromEntries(new FormData(e.target).entries());
       try {
-        if (existing) { await api(`/ssh/${encodeURIComponent(existing.username)}`, { method: 'PATCH', body: fd }); toast(`Updated ${existing.username}`); closeSheet(); go('tunnels'); }
-        else { const r = await api('/ssh', { method: 'POST', body: fd }); toast(`Created ${r.item.username}`); go('tunnels'); showSshTicket(r.item); }
+        if (existing) { await api(`/ssh/${encodeURIComponent(existing.username)}`, { method: 'PATCH', body: fd }); toast(`Updated ${existing.username}`); closeSheet(); renderTunnels(); }
+        else { const r = await api('/ssh', { method: 'POST', body: fd }); toast(`Created ${r.item.username}`); renderTunnels(); showSshTicket(r.item); }
       } catch (err) { toast(err.message, 'err'); }
     };
   }
 
   /* ═════════════════════ 3. XRAY (6-Corner SVG Hexagon + 2s Real-Time Sync) ═════════════════════ */
   async function renderXray() {
-    const mySeq = STATE.navSeq;
     let items = [];
     let xrayBusy = false;
     const protos = ['vless', 'vmess', 'trojan'];
@@ -1169,22 +1140,18 @@
       : `<div class="empty"><p>No active VLESS, VMess or Trojan sessions right now.</p></div>`;
 
     const initData = await api('/xray');
-    if (STATE.navSeq !== mySeq || STATE.bay !== 'xray') return;
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
-    const getOnlineCount = (u) => (u.status === 'disabled' ? 0 : (u.online || 0));
-    const getLiveIps = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto)
-      .flatMap(u => (u.ips || []).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
+    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
 
-    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + getOnlineCount(u), 0);
+    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
     const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && getOnlineCount(u) > 0)
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (u.online > 0 || (u.ips && u.ips.length > 0)))
       .map(u => ({
         user: u.username,
         proto: u.proto.toUpperCase(),
-        online: getOnlineCount(u),
+        online: u.online || (u.ips || []).length || 0,
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -1259,15 +1226,12 @@
             </div>
           </article>`;
         }
-        const onlineCnt = getOnlineCount(u);
+        const ipList = isDis ? [] : (u.ips || []);
+        const onlineCnt = isDis ? 0 : (ipList.length || u.online || 0);
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
         const wsPath = `/alyan-${u.proto}`;
-        const curBps = (u.bps !== undefined && u.bps > 0) ? u.bps : Math.round((u.delta || 0) / 2);
-        const rateHtml = (!isDis && onlineCnt > 0)
-          ? ` <span class="pill lit sm" style="font-size:10px;padding:1px 6px;margin-left:6px">⚡ ${fmtRate(curBps)}</span>`
-          : '';
         return `
         <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
           <div class="acc-top">
@@ -1279,7 +1243,7 @@
             </div>
           </div>
           <div class="meter">
-            <div class="meter-h"><span>TRAFFIC${rateHtml}</span><b>${fmtBytes(u.used_bytes, true)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
+            <div class="meter-h"><span>TRAFFIC</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
             <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
           </div>
           <div class="acc-stats">
@@ -1344,13 +1308,11 @@
     $('#xraySearch').oninput = (e) => { STATE.searchXray = e.target.value; paintXrayCards(); };
     paintXrayCards();
 
-    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
+      if (STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
       xrayBusy = true;
       try {
         const res = await api('/xray');
-        if (STATE.navSeq !== mySeq || STATE.bay !== 'xray') return;
         items = res.items || [];
         STATE.cfg = res.cfg;
         paintXrayCards();
@@ -1416,12 +1378,12 @@
           STATE.xrayProto = r.item.proto;
           toast(`Updated ${r.item.username}`);
           closeSheet();
-          go('xray');
+          renderXray();
         } else {
           const r = await api('/xray', { method: 'POST', body: fd });
           STATE.xrayProto = r.item.proto;
           toast(`Created ${r.item.username}`);
-          go('xray');
+          renderXray();
           showXrayLinks(r.item);
         }
       } catch (err) { toast(err.message, 'err'); }
@@ -1431,7 +1393,6 @@
 
   /* ═════════════════════ 4. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
   async function renderEngine() {
-    const mySeq = STATE.navSeq;
     let engBusy = false;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
@@ -1445,7 +1406,6 @@
 
     const drawEngine = async () => {
       const { services, ports } = await api('/engine');
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'engine') return;
       const pubPorts = (ports || []).filter(p => p.scope === 'public');
       const locPorts = (ports || []).filter(p => p.scope !== 'public');
 
@@ -1539,10 +1499,8 @@
       };
     }
     await drawEngine();
-    if (STATE.navSeq !== mySeq || STATE.bay !== 'engine') return;
-    clearInterval(STATE.timer);
     STATE.timer = setInterval(async () => {
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'engine' || document.hidden || engBusy) return;
+      if (STATE.bay !== 'engine' || document.hidden || engBusy) return;
       engBusy = true;
       try { await drawEngine(); } catch {} finally { engBusy = false; }
     }, 2000);
@@ -1550,7 +1508,6 @@
 
   /* ═════════════════════ 5. VPS INFO (Hardware, Wire-Speed Throughput & Load · 2s Sync) ═════════════════════ */
   async function renderTelemetry() {
-    const mySeq = STATE.navSeq;
     let telBusy = false;
     setBayHead(
       'SERVER SPECS & LIVE TRAFFIC',
@@ -1560,7 +1517,6 @@
 
     const drawTel = async () => {
       const d = await api('/telemetry');
-      if (STATE.navSeq !== mySeq || STATE.bay !== 'telemetry') return;
       STATE.cfg = d.cfg; syncHud();
       const spCpu = sparkPath(d.hist.cpu, 540, 175, 100);
       const spRam = sparkPath(d.hist.ram, 540, 175, 100);
@@ -1918,9 +1874,7 @@
 
   /* ═════════════════════ 9. LIST (Activity & Event List · 2s Sync) ═════════════════════ */
   async function renderAudit() {
-    const mySeq = STATE.navSeq;
     let items = (await api('/audit')).items || [];
-    if (STATE.navSeq !== mySeq || STATE.bay !== 'audit') return;
     let auditBusy = false;
     setBayHead(
       'ACTIVITY STREAM',
@@ -2065,9 +2019,6 @@
     $('#btnPalette').onclick = openPalette;
     window.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
-    });
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && STATE.bay) { go(STATE.bay); }
     });
     $('#btnMe').onclick = () => {
       openSheet(`Signed in as ${STATE.me.username}`, 'SESSION PROFILE', `
