@@ -29,6 +29,8 @@ curl -fsSL "${REPO_RAW}/templates/nginx-router.conf.tpl?t=${TS}" | tr -d '\r' > 
 curl -fsSL "${REPO_RAW}/services/guard/alyan-guard.py?t=${TS}" | tr -d '\r' > "${INSTALL_DIR}/services/guard/alyan-guard.py"
 curl -fsSL "${REPO_RAW}/core/alyan-ctl?t=${TS}" | tr -d '\r' > "${INSTALL_DIR}/core/alyan-ctl"
 curl -fsSL "${REPO_RAW}/panel/static/app.js?t=${TS}" | tr -d '\r' > "${INSTALL_DIR}/panel/static/app.js"
+curl -fsSL "${REPO_RAW}/panel/static/index.html?t=${TS}" | tr -d '\r' > "${INSTALL_DIR}/panel/static/index.html"
+curl -fsSL "${REPO_RAW}/bot/alyan-bot.py?t=${TS}" | tr -d '\r' > "${INSTALL_DIR}/bot/alyan-bot.py"
 
 chmod +x "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/services/guard/alyan-guard.py"
 ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
@@ -899,14 +901,65 @@ g_txt = g_txt.replace(
     "XRAY_ACTIVE_DEVICES.pop(uuid, None)\n                XRAY_SESSIONS.pop(uuid, None)\n                XRAY_SESSION_SEQ.pop(uuid, None)",
 )
 
+# 1f. Format memory/data badges in alyan-guard.py to exact 2 decimals (e.g. 20.92 MB / 1.25 GB)
+old_guard_mem = 'return f"{mb / 1024.0:.1f} GB" if mb >= 1024 else f"{mb:.1f} MB"'
+new_guard_mem = 'return f"{mb / 1024.0:.2f} GB" if mb >= 1024 else f"{mb:.2f} MB"'
+assert old_guard_mem in g_txt, "fmt_mem not found in alyan-guard.py"
+g_txt = g_txt.replace(old_guard_mem, new_guard_mem, 1)
+
 # Compile-check before saving
 compile(g_txt, str(guard_path), "exec")
 guard_path.write_text(g_txt, encoding="utf-8")
-print("✔ VLESS Session-ID Engine installed and syntax-verified in alyan-guard.py.")
+print("✔ VLESS Session-ID Engine & 2-decimal formatting installed in alyan-guard.py.")
 
-# ── 2. Patch app.js so Connected IPs, Top Live Users & Card Live Users all sync to Session IDs ──
+# ── 2. Patch core/alyan-ctl fmt_mem to exact 2 decimals ──
+ctl_path = Path("/opt/alyan/core/alyan-ctl")
+if ctl_path.exists():
+    c_txt = ctl_path.read_text(encoding="utf-8")
+    old_ctl_mem = '''    if mb >= 1024:
+        return f"{mb / 1024.0:.1f} GB"
+    return f"{mb:.1f} MB"'''
+    new_ctl_mem = '''    if mb >= 1024:
+        return f"{mb / 1024.0:.2f} GB"
+    return f"{mb:.2f} MB"'''
+    assert old_ctl_mem in c_txt, "fmt_mem not found in alyan-ctl"
+    c_txt = c_txt.replace(old_ctl_mem, new_ctl_mem, 1)
+    compile(c_txt, str(ctl_path), "exec")
+    ctl_path.write_text(c_txt, encoding="utf-8")
+
+# ── 3. Patch bot/alyan-bot.py fmt_bytes to exact 2 decimals (KB / MB / GB) ──
+bot_path = Path("/opt/alyan/bot/alyan-bot.py")
+if bot_path.exists():
+    b_txt = bot_path.read_text(encoding="utf-8")
+    old_bot_fmt = '''def fmt_bytes(b: int | float) -> str:
+    val = float(b or 0)
+    if val >= 1073741824:
+        return f"{val / 1073741824:.2f} GB"
+    if val >= 1048576:
+        return f"{val / 1048576:.1f} MB"
+    return f"{int(val / 1024)} KB"'''
+    new_bot_fmt = '''def fmt_bytes(b: int | float) -> str:
+    val = max(0.0, float(b or 0))
+    if val < 1024:
+        return f"{int(round(val))} B"
+    if val >= 1073741824:
+        return f"{val / 1073741824:.2f} GB"
+    if val >= 1048576:
+        return f"{val / 1048576:.2f} MB"
+    return f"{val / 1024:.2f} KB"'''
+    assert old_bot_fmt in b_txt, "fmt_bytes not found in alyan-bot.py"
+    b_txt = b_txt.replace(old_bot_fmt, new_bot_fmt, 1)
+    compile(b_txt, str(bot_path), "exec")
+    bot_path.write_text(b_txt, encoding="utf-8")
+
+# ── 4. Patch app.js: Session-ID sync + universal 2-decimal data formatting (e.g. 20.92 GB everywhere) ──
 app_js_path = Path("/opt/alyan/panel/static/app.js")
 j_txt = app_js_path.read_text(encoding="utf-8")
+
+old_fmt_bytes = "return (v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + u[i];"
+new_fmt_bytes = "return v.toFixed(2) + ' ' + u[i];"
+assert old_fmt_bytes in j_txt, "fmtBytes line not found in app.js"
+j_txt = j_txt.replace(old_fmt_bytes, new_fmt_bytes, 1)
 
 old_js_top = '''    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
 
@@ -949,8 +1002,17 @@ assert old_js_card in j_txt, "Card onlineCnt line not found in app.js"
 j_txt = j_txt.replace(old_js_card, new_js_card, 1)
 
 app_js_path.write_text(j_txt, encoding="utf-8")
-print("✔ app.js synced with VLESS Session-ID counts (2-decimal GB formatting preserved).")
+
+# Bust browser cache in index.html so updated app.js loads immediately
+idx_path = Path("/opt/alyan/panel/static/index.html")
+if idx_path.exists():
+    i_txt = idx_path.read_text(encoding="utf-8")
+    idx_path.write_text(i_txt.replace("app.js?v=2.2", "app.js?v=2.4"), encoding="utf-8")
+
+print("✔ Universal 2-decimal data formatting (e.g. 20.92 GB) applied across Panel, Guard, CTL & Bot.")
 PYEOF
+
+id -u _alyanpanel &>/dev/null && chown -R _alyanpanel:_alyanpanel "${INSTALL_DIR}/panel" "${INSTALL_DIR}/bot" || true
 
 echo -e "\033[38;5;208m[5/5]\033[0m Syncing Xray config, clearing stale logs & restarting Xray/Guard/Panel..."
 /usr/local/bin/alyan-ctl xray-sync
@@ -958,5 +1020,8 @@ echo -e "\033[38;5;208m[5/5]\033[0m Syncing Xray config, clearing stale logs & r
 : > /var/log/nginx/alyan-xray.log 2>/dev/null || true
 rm -f /run/alyan-live.json /run/alyan-live.tmp
 systemctl restart xray alyan-guard alyan-panel
+if systemctl is-active --quiet alyan-bot 2>/dev/null; then
+  systemctl restart alyan-bot || true
+fi
 
-echo -e "\033[38;5;82m✔ VLESS Session-ID update applied! Refresh browser with Ctrl+F5 and test 1, 2, 3 users.\033[0m"
+echo -e "\033[38;5;82m✔ VLESS Session-ID + 2-Decimal Data Formatting (20.92 GB) applied! Refresh browser (Ctrl+F5).\033[0m"
