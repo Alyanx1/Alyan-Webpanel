@@ -9,30 +9,71 @@ map $http_upgrade $alyan_connection_upgrade {
 
 # CloudFront Viewer Address (AWS CloudFront Real Client IP without :port)
 map $http_cloudfront_viewer_address $alyan_cf_viewer_ip {
-    default                      "";
-    "~^([0-9a-fA-F\.:]+):\d+"     $1;
+    default                        "";
+    "~^\[([0-9a-fA-F:]+)\]:\d+$"  $1;
+    "~^([0-9\.]+):\d+$"            $1;
+    "~^([0-9a-fA-F:]+):\d+$"       $1;
+    "~^([0-9a-fA-F\.:]+)$"         $1;
 }
 
-# First IP from X-Forwarded-For
+# BunnyCDN Viewer Address (without :port if present)
+map $http_b_cdn_viewer_address $alyan_bcdn_viewer_ip {
+    default                                  "";
+    "~^\s*\[([0-9a-fA-F:]+)\]"            $1;
+    "~^\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)" $1;
+    "~^\s*([0-9a-fA-F:]+)$"                 $1;
+}
+
+# First clean IP from X-Forwarded-For (strips optional :port or brackets)
 map $http_x_forwarded_for $alyan_xff_first {
-    default                      "";
-    "~^([0-9a-fA-F\.:]+)"        $1;
+    default                                  "";
+    "~^\s*\[([0-9a-fA-F:]+)\]"            $1;
+    "~^\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)" $1;
+    "~^\s*([0-9a-fA-F:]+)"                  $1;
 }
 
-# Unified CDN Header Priority: CloudFront Viewer Address -> CF-Connecting-IP -> True-Client-IP -> X-Forwarded-For
-map $alyan_cf_viewer_ip $alyan_cdn_ip_step1 {
-    ""      $http_cf_connecting_ip;
-    default $alyan_cf_viewer_ip;
+# Detect BunnyCDN origin requests (even when chained BunnyCDN -> Cloudflare -> VPS)
+map "$http_cdn_pullzone$http_cdn_requestcountrycode" $alyan_bcdn_xff_ip {
+    ""      "";
+    default $alyan_xff_first;
+}
+
+# Unified Real-IP Priority:
+#   1. BunnyCDN Viewer / BunnyCDN XFF (prevents 2 BunnyCDN edge PoPs showing when chained via CF)
+#   2. CloudFront-Viewer-Address
+#   3. CF-Connecting-IP
+#   4. True-Client-IP
+#   5. X-Forwarded-For (first IP)
+#   6. X-Real-IP
+#   7. PROXY protocol peer IP
+map $alyan_bcdn_viewer_ip $alyan_cdn_step0 {
+    ""      $alyan_bcdn_xff_ip;
+    default $alyan_bcdn_viewer_ip;
+}
+
+map $alyan_cdn_step0 $alyan_cdn_ip_step1 {
+    ""      $alyan_cf_viewer_ip;
+    default $alyan_cdn_step0;
 }
 
 map $alyan_cdn_ip_step1 $alyan_cdn_ip_step2 {
-    ""      $http_true_client_ip;
+    ""      $http_cf_connecting_ip;
     default $alyan_cdn_ip_step1;
 }
 
-map $alyan_cdn_ip_step2 $alyan_cdn_resolved_ip {
-    ""      $alyan_xff_first;
+map $alyan_cdn_ip_step2 $alyan_cdn_ip_step3 {
+    ""      $http_true_client_ip;
     default $alyan_cdn_ip_step2;
+}
+
+map $alyan_cdn_ip_step3 $alyan_cdn_ip_step4 {
+    ""      $alyan_xff_first;
+    default $alyan_cdn_ip_step3;
+}
+
+map $alyan_cdn_ip_step4 $alyan_cdn_resolved_ip {
+    ""      $http_x_real_ip;
+    default $alyan_cdn_ip_step4;
 }
 
 map $alyan_cdn_resolved_ip $alyan_real_ip {
@@ -40,7 +81,7 @@ map $alyan_cdn_resolved_ip $alyan_real_ip {
     default $alyan_cdn_resolved_ip;
 }
 
-log_format alyan_xray '$time_iso8601 $alyan_real_ip $status $request_uri';
+log_format alyan_xray '$msec $alyan_real_ip $status $request_uri';
 
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {

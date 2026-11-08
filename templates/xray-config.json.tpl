@@ -22,6 +22,7 @@
         "downlinkOnly": 5,
         "statsUserUplink": true,
         "statsUserDownlink": true,
+        "statsUserOnline": true,
         "bufferSize": 4096
       }
     },
@@ -58,7 +59,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -77,7 +78,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -96,7 +97,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -116,7 +117,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -135,7 +136,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -154,7 +155,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     },
@@ -192,7 +193,7 @@
         },
         "sockopt": {
           "tcpNoDelay": true,
-          "trustedXForwardedFor": ["127.0.0.1", "::1"]
+          "trustedXForwardedFor": ["X-Forwarded-For", "X-Real-IP"]
         }
       }
     }

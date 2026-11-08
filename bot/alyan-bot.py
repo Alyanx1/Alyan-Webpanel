@@ -47,12 +47,14 @@ async def ctl(subcmd: list[str]) -> dict[str, Any]:
 
 
 def fmt_bytes(b: int | float) -> str:
-    val = float(b or 0)
+    val = max(0.0, float(b or 0))
+    if val < 1024:
+        return f"{int(round(val))} B"
     if val >= 1073741824:
         return f"{val / 1073741824:.2f} GB"
     if val >= 1048576:
-        return f"{val / 1048576:.1f} MB"
-    return f"{int(val / 1024)} KB"
+        return f"{val / 1048576:.2f} MB"
+    return f"{val / 1024:.2f} KB"
 
 
 def build_ssh_card_html(item: dict, domain: str) -> str:

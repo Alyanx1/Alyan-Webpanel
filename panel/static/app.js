@@ -324,7 +324,7 @@
     const u = ['KB', 'MB', 'GB', 'TB'];
     let i = -1, v = n;
     do { v /= 1024; i++; } while (v >= 1024 && i < u.length - 1);
-    return (v >= 100 ? v.toFixed(0) : v.toFixed(v >= 10 ? 1 : 2)) + ' ' + u[i];
+    return v.toFixed(2) + ' ' + u[i];
   };
   const fmtRate = (bps) => fmtBytes(bps) + '/s';
   const randHex = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
@@ -1143,15 +1143,19 @@
     items = initData.items || [];
     STATE.cfg = initData.cfg; syncHud();
 
-    const getLiveIps = () => items.flatMap(u => (u.status === 'disabled' ? [] : (u.ips || [])).map(ip => ({ user: u.username, proto: u.proto.toUpperCase(), ip })));
+    const getLiveIps = () => items
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto)
+      .flatMap(u => (u.ips || []).map((ip, idx) => ({ user: `${u.username} (S${idx + 1})`, proto: u.proto.toUpperCase(), ip })));
 
-    const getXrayLiveUsersTotal = () => items.filter(u => u.proto === STATE.xrayProto).reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online || (u.ips || []).length || 0)), 0);
+    const getXrayLiveUsersTotal = () => items
+      .filter(u => u.proto === STATE.xrayProto)
+      .reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (Number(u.online) || (u.ips || []).length || 0)), 0);
     const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (u.online > 0 || (u.ips && u.ips.length > 0)))
+      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (Number(u.online) > 0 || (u.ips && u.ips.length > 0)))
       .map(u => ({
         user: u.username,
         proto: u.proto.toUpperCase(),
-        online: u.online || (u.ips || []).length || 0,
+        online: Number(u.online) || (u.ips || []).length || 0,
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -1227,7 +1231,7 @@
           </article>`;
         }
         const ipList = isDis ? [] : (u.ips || []);
-        const onlineCnt = isDis ? 0 : (ipList.length || u.online || 0);
+        const onlineCnt = isDis ? 0 : (Number(u.online) || ipList.length || 0);
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;

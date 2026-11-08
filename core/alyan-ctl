@@ -692,8 +692,8 @@ def fmt_mem(mem_bytes: int) -> str:
         return "—"
     mb = mem_bytes / 1048576.0
     if mb >= 1024:
-        return f"{mb / 1024.0:.1f} GB"
-    return f"{mb:.1f} MB"
+        return f"{mb / 1024.0:.2f} GB"
+    return f"{mb:.2f} MB"
 
 
 def fmt_mono_uptime(enter_usec: int) -> str:

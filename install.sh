@@ -174,7 +174,7 @@ deploy_project_files() {
     fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
   done
   rm -rf "/tmp/alyan-bundle-src" "${INSTALL_DIR}/services/qos"
-  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" 2>/dev/null || true
+  chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/guard/alyan-guard.py" "${INSTALL_DIR}/services/wsd/alyan-wsd.py" 2>/dev/null || true
   ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
   ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
   cat >/usr/local/bin/alyan-update <<'UPDSCRIPT'
@@ -243,7 +243,8 @@ except Exception:
   run_task 80 "Ensuring Dropbear SSH-2.0-ALYAN_Server branding" patch_dropbear_branding
   rebuild_and_restart() {
     : > /var/log/xray/access.log 2>/dev/null || true
-    rm -f /run/alyan-live.json /run/alyan-ssl-cache.json
+    : > /var/log/nginx/alyan-xray.log 2>/dev/null || true
+    rm -f /run/alyan-live.json /run/alyan-live.tmp /run/alyan-ssl-cache.json
     systemctl daemon-reload
     /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
     for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
