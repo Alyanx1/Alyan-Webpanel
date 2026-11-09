@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — VLESS Exact 1:1 Data + 2-3s Instant Disconnect Update
-#  1) Eliminates 200+ MB kernel/loopback pre-buffering (1:1 data like SSH)
-#  2) Bypasses Xray's 3-4 min XUDP/OnlineMap linger for 2-3s instant offline
+#  🔥 ALYAN WEBPANEL — VLESS Idle-Online + 2-3s Disconnect + Exact 1:1 Data
+#  1) Stays ONLINE continuously when VLESS is connected & phone is idle on side
+#  2) Goes OFFLINE in 2-3s when VLESS is disconnected (1s WS Ping/Pong + ss -K)
+#  3) Eliminates 200+ MB kernel/loopback pre-buffering (1:1 data like SSH)
 #  Safe Standalone Updater (Does NOT touch SSH / Dropbear / alyan-wsd)
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -13,7 +14,7 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " 🔥 ALYAN VLESS — Exact 1:1 Data & 2-3s Instant Offline Update"
+echo " 🔥 ALYAN VLESS — Idle-Online + 2-3s Disconnect + 1:1 Data Update"
 echo "════════════════════════════════════════════════════════════════════"
 
 # ─── [1/5] Apply Tight Kernel TCP Backpressure & Fast Keepalive ──────────────
@@ -80,8 +81,8 @@ for p_str in ("/opt/alyan/core/alyan-ctl", "/usr/local/bin/alyan-ctl"):
     p.write_text(txt, encoding="utf-8")
 EOF_PATCH_CTL
 
-# ─── [2/5] Update Xray Template (bufferSize: 0 + Fast Disconnect Timeouts) ───
-echo "[2/5] Updating Xray template (bufferSize: 0, connIdle: 30, heartbeatPeriod: 2)..."
+# ─── [2/5] Update Xray Template (heartbeatPeriod: 1, downlinkOnly: 0, connIdle: 600) ─
+echo "[2/5] Updating Xray template (heartbeatPeriod: 1, downlinkOnly: 0, connIdle: 600, bufferSize: 0)..."
 mkdir -p /opt/alyan/templates
 cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
 {
@@ -103,9 +104,9 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
     "levels": {
       "0": {
         "handshake": 4,
-        "connIdle": 30,
-        "uplinkOnly": 1,
-        "downlinkOnly": 1,
+        "connIdle": 3600,
+        "uplinkOnly": 3600,
+        "downlinkOnly": 0,
         "statsUserUplink": true,
         "statsUserDownlink": true,
         "statsUserOnline": true,
@@ -142,7 +143,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-vless",
-          "heartbeatPeriod": 2
+          "heartbeatPeriod": 1
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -163,7 +164,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-vmess",
-          "heartbeatPeriod": 2
+          "heartbeatPeriod": 1
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -184,7 +185,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
         "network": "ws",
         "wsSettings": {
           "path": "/alyan-trojan",
-          "heartbeatPeriod": 2
+          "heartbeatPeriod": 1
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -748,8 +749,8 @@ if hap_tpl.exists():
             hap_out.write_text(prev_hap, encoding="utf-8")
 EOF_RENDER_ROUTERS
 
-# ─── [4/5] Update alyan-guard.py (2-3s Instant Disconnect + Session-ID) ──────
-echo "[4/5] Updating alyan-guard.py with 2-3s instant disconnect engine..."
+# ─── [4/5] Update alyan-guard.py (Idle-Online + 2-3s Instant Disconnect) ─────
+echo "[4/5] Updating alyan-guard.py with WS Pong watchdog & idle-online engine..."
 mkdir -p /opt/alyan/services/guard
 cat <<'EOF_ALYAN_GUARD' > /opt/alyan/services/guard/alyan-guard.py
 #!/usr/bin/env python3
@@ -1409,27 +1410,115 @@ PROTO_PORTS = {
     "vmess": (10002, 10012),
     "trojan": (10003, 10013, 10023),
 }
+WS_HEARTBEAT_PORTS = (10001, 10002, 10003)
 XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
+XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int]] = {}
+SS_RX_BYTES_RE = re.compile(r"\bbytes_received:(\d+)")
+SS_DATA_SEGS_IN_RE = re.compile(r"\bdata_segs_in:(\d+)")
+SS_LASTRCV_RE = re.compile(r"\blastrcv:(\d+)")
 
 
 def scan_active_proto_sockets() -> dict[str, int]:
-    """Return count of active ESTAB sockets on Xray inbound ports."""
+    """
+    Return count of live ESTAB sockets on Xray inbound ports using `ss -tin`.
+    For WebSocket ports (10001/10002/10003) where Xray sends a 1s WebSocket Ping
+    (`heartbeatPeriod: 1`), a connected phone (even sitting completely idle on the
+    side with 0 browsing activity!) replies with a 6-byte WebSocket Pong every 1s,
+    incrementing `bytes_received` and `data_segs_in`.
+    If a socket receives 0 bytes from the client for >=2.2s (phone disconnected
+    behind CGNAT/CDN without FIN, or stale Mux worker), `ss -K` immediately destroys
+    the dead loopback socket so Xray removes the IP from OnlineMap within 2-3s.
+    """
     counts = {"vless": 0, "vmess": 0, "trojan": 0}
+    now_ts = time.monotonic()
+    seen_keys: set[str] = set()
     try:
-        out = subprocess.check_output(["ss", "-tn"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
-        for ln in out.splitlines():
+        out = subprocess.check_output(["ss", "-tin"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        lines = out.splitlines()
+        i = 0
+        n = len(lines)
+        while i < n:
+            ln = lines[i]
             if "ESTAB" not in ln:
+                i += 1
                 continue
             cols = ln.split()
             if len(cols) < 5:
+                i += 1
                 continue
             try:
                 lport = int(cols[3].rsplit(":", 1)[-1])
+                rport = int(cols[4].rsplit(":", 1)[-1])
             except ValueError:
+                i += 1
                 continue
+
+            info_ln = ""
+            if (i + 1) < n and lines[i + 1].startswith((" ", "\t")):
+                info_ln = lines[i + 1]
+                i += 2
+            else:
+                i += 1
+
+            matched_proto = None
             for pr, ports in PROTO_PORTS.items():
                 if lport in ports:
-                    counts[pr] += 1
+                    matched_proto = pr
+                    break
+            if not matched_proto:
+                continue
+
+            if lport in WS_HEARTBEAT_PORTS and info_ln:
+                sock_key = f"{lport}:{rport}"
+                seen_keys.add(sock_key)
+                m_rx = SS_RX_BYTES_RE.search(info_ln)
+                m_ds = SS_DATA_SEGS_IN_RE.search(info_ln)
+                m_lr = SS_LASTRCV_RE.search(info_ln)
+                rx_b = int(m_rx.group(1)) if m_rx else 0
+                d_segs = int(m_ds.group(1)) if m_ds else 0
+                lastrcv_ms = int(m_lr.group(1)) if m_lr else None
+
+                prev = XRAY_SOCKET_RX_STATE.get(sock_key)
+                if prev is None:
+                    XRAY_SOCKET_RX_STATE[sock_key] = {
+                        "rx_bytes": rx_b,
+                        "data_segs_in": d_segs,
+                        "last_active_ts": now_ts,
+                    }
+                    counts[matched_proto] += 1
+                else:
+                    if (
+                        rx_b > int(prev["rx_bytes"])
+                        or d_segs > int(prev["data_segs_in"])
+                        or (lastrcv_ms is not None and lastrcv_ms < 1800)
+                    ):
+                        prev["rx_bytes"] = rx_b
+                        prev["data_segs_in"] = d_segs
+                        prev["last_active_ts"] = now_ts
+                        counts[matched_proto] += 1
+                    elif (now_ts - float(prev["last_active_ts"])) < 2.2:
+                        counts[matched_proto] += 1
+                    else:
+                        # Client stopped replying to 1s WebSocket Pings -> dead/disconnected socket!
+                        XRAY_SOCKET_RX_STATE.pop(sock_key, None)
+                        subprocess.run(
+                            ["ss", "-K", "src", "127.0.0.1", "sport", "=", f":{lport}", "dst", "127.0.0.1", "dport", "=", f":{rport}"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=0.4,
+                        )
+                        subprocess.run(
+                            ["ss", "-K", "src", "127.0.0.1", "sport", "=", f":{rport}", "dst", "127.0.0.1", "dport", "=", f":{lport}"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=0.4,
+                        )
+            else:
+                counts[matched_proto] += 1
+
+        for k in list(XRAY_SOCKET_RX_STATE.keys()):
+            if k not in seen_keys:
+                XRAY_SOCKET_RX_STATE.pop(k, None)
     except Exception:
         pass
     return counts
@@ -1517,16 +1606,16 @@ def update_vless_user_sessions(
     now_ts: float,
 ) -> tuple[list[str], int]:
     """
-    Stateful VLESS Session-ID Engine with 2-3s Instant Disconnect Detection:
+    Stateful VLESS Session-ID Engine (Continuous Idle-Online + 2-3s Instant Disconnect):
       - Assigns discrete Session IDs (S1, S2, S3...) per connected user on `uid`.
       - Binds 1 mobile phone's parallel WebSocket/gRPC/XHTTP streams into 1 Session ID:
           1) Same /16 IPv4 CGNAT subscriber pool or /56 IPv6 prefix -> same Session ID
           2) Dual-Stack (IPv4 + IPv6 simultaneously on 1 VoLTE SIM) -> merged into 1 Session ID
           3) Same /12 carrier superblock within 3.0s initial connection burst -> same Session ID
           4) Seamless CGNAT IP handover when a session's previous IP closes -> reuses Session ID
-      - Ignores stale Xray OnlineMap entries once traffic & new stream handshakes stop
-        (because Xray's XUDPManager & connIdle hold disconnected IPs in OnlineMap for 3-4 min),
-        guaranteeing instant 2-3s offline transition when the user disconnects VLESS.
+      - Keeps connected users online continuously even when the phone sits idle with 0 activity
+        (verified via 1s WebSocket Ping/Pong on live_om_ips), while transitioning to offline
+        within 2-3s the moment the user disconnects VLESS.
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
 
@@ -1538,15 +1627,11 @@ def update_vless_user_sessions(
     if active_traffic:
         XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
-    # Xray's OnlineMap (live_om_ips) retains disconnected IPs for 3-4 minutes due to XUDPManager
-    # (common/mux/session.go:196) and connIdle. Only treat OnlineMap IPs as active while bytes
-    # are actively flowing for this UUID; new stream handshakes come from recent_log_ips (<=2.2s).
-    active_om_ips = live_om_ips if active_traffic else []
-    real_live_set = {ip for ip in active_om_ips if not is_trusted_cdn(ip)}
+    real_live_set = {ip for ip in live_om_ips if not is_trusted_cdn(ip)}
     raw_real_cands: list[str] = []
     cdn_cands: list[str] = []
 
-    for ip in active_om_ips + recent_log_ips:
+    for ip in live_om_ips + recent_log_ips:
         if is_trusted_cdn(ip):
             if ip not in cdn_cands:
                 cdn_cands.append(ip)
@@ -1605,7 +1690,7 @@ def update_vless_user_sessions(
                         matched_sess = s
                         break
 
-            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed while new IP opened)
+            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed in OnlineMap while new IP opened)
             if matched_sess is None and online_map_ok:
                 recent_set = set(recent_log_ips)
                 for s in sessions.values():
@@ -1653,7 +1738,7 @@ def update_vless_user_sessions(
                     "last_seen": now_ts,
                     "_touched": True,
                 }
-    elif not sessions and cdn_cands and active_traffic:
+    elif not sessions and cdn_cands and (active_traffic or bool(live_om_ips)):
         # Only unwrapped CDN edge IPs visible -> collapse ALL CDN PoPs into 1 single session
         sessions["S-CDN"] = {
             "session_id": "S-CDN",
@@ -1667,19 +1752,19 @@ def update_vless_user_sessions(
             "last_seen": now_ts,
             "_touched": True,
         }
-    elif sessions and cdn_cands and "S-CDN" in sessions and active_traffic:
+    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(live_om_ips)):
         sessions["S-CDN"]["ips"].update(cdn_cands)
         sessions["S-CDN"]["last_seen"] = now_ts
         sessions["S-CDN"]["_touched"] = True
 
-    live_all_set = set(active_om_ips) | set(recent_log_ips)
+    live_all_set = set(live_om_ips) | set(recent_log_ips)
     for sid, s in list(sessions.items()):
         touched = s.pop("_touched", False)
         has_open_stream = bool(s["ips"] & live_all_set)
         if touched or has_open_stream or (len(sessions) == 1 and active_traffic):
             s["last_seen"] = now_ts
 
-        # Expire disconnected session within 2-3s (1 cycle without traffic or new stream)
+        # Expire disconnected session within 2-3s once stream closes in OnlineMap
         if (now_ts - s["last_seen"]) >= 1.5:
             sessions.pop(sid, None)
 
@@ -2057,9 +2142,9 @@ pkill -9 -f "alyan-guard.py" >/dev/null 2>&1 || true
 systemctl start alyan-guard
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " ✅ VLESS 1:1 DATA & 2-3s INSTANT DISCONNECT UPDATE APPLIED!"
-echo "    - VLESS goes offline in 2-3 seconds after disconnect"
+echo " ✅ VLESS IDLE-ONLINE + 2-3s DISCONNECT + 1:1 DATA UPDATE APPLIED!"
+echo "    - Stays ONLINE continuously when VLESS is connected & phone is idle"
+echo "    - Goes OFFLINE in 2-3s when VLESS is disconnected (WS Pong + ss -K)"
 echo "    - Exact 1:1 data counting (0 KB Xray buffer, 16 KB notsent_lowat)"
-echo "    - Session-ID live user counter & 2-decimal formatting active"
 echo "    - SSH (Dropbear & alyan-wsd) left 100% untouched"
 echo "════════════════════════════════════════════════════════════════════"
