@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — VLESS Exact 1:1 Data Counting & Zero-Bufferbloat Fix
-#  Eliminates 200+ MB kernel/loopback pre-buffering so VLESS counts 1:1 like SSH
+#  🔥 ALYAN WEBPANEL — VLESS Exact 1:1 Data + 2-3s Instant Disconnect Update
+#  1) Eliminates 200+ MB kernel/loopback pre-buffering (1:1 data like SSH)
+#  2) Bypasses Xray's 3-4 min XUDP/OnlineMap linger for 2-3s instant offline
 #  Safe Standalone Updater (Does NOT touch SSH / Dropbear / alyan-wsd)
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -12,11 +13,11 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " 🔥 ALYAN VLESS — Exact 1:1 Data Counting & Backpressure Update"
+echo " 🔥 ALYAN VLESS — Exact 1:1 Data & 2-3s Instant Offline Update"
 echo "════════════════════════════════════════════════════════════════════"
 
-# ─── [1/5] Apply Tight Kernel TCP Backpressure (Eliminate 64MB Socket Bloat) ─
-echo "[1/5] Locking kernel TCP socket backpressure (tcp_notsent_lowat=16KB, 64KB–256KB buffers)..."
+# ─── [1/5] Apply Tight Kernel TCP Backpressure & Fast Keepalive ──────────────
+echo "[1/5] Locking kernel TCP socket backpressure & fast keepalive probes..."
 mkdir -p /etc/sysctl.d
 cat <<'EOF_SYSCTL' > /etc/sysctl.d/99-alyan-turbo.conf
 # Alyan Webpanel — Wire-Speed + Exact 1:1 Proxy Accounting + Low-Bufferbloat Profile
@@ -39,13 +40,13 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 0
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_fin_timeout = 5
 net.ipv4.tcp_max_syn_backlog = 65536
 net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.ip_local_port_range = 10240 65535
-net.ipv4.tcp_keepalive_time = 60
-net.ipv4.tcp_keepalive_intvl = 10
-net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_keepalive_time = 15
+net.ipv4.tcp_keepalive_intvl = 3
+net.ipv4.tcp_keepalive_probes = 3
 EOF_SYSCTL
 
 sysctl --system >/dev/null 2>&1 || true
@@ -56,6 +57,10 @@ sysctl -w net.core.wmem_max=524288 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_rmem="4096 65536 262144" >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_wmem="4096 65536 262144" >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_fin_timeout=5 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_keepalive_time=15 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_keepalive_intvl=3 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_keepalive_probes=3 >/dev/null 2>&1 || true
 
 # Patch alyan-ctl on VPS so future config syncs keep these exact sysctl values
 python3 - <<'EOF_PATCH_CTL'
@@ -75,8 +80,8 @@ for p_str in ("/opt/alyan/core/alyan-ctl", "/usr/local/bin/alyan-ctl"):
     p.write_text(txt, encoding="utf-8")
 EOF_PATCH_CTL
 
-# ─── [2/5] Update Xray Template (bufferSize: 0 + tcpWindowClamp) ─────────────
-echo "[2/5] Updating Xray template (bufferSize: 0 + 64KB/128KB window clamp)..."
+# ─── [2/5] Update Xray Template (bufferSize: 0 + Fast Disconnect Timeouts) ───
+echo "[2/5] Updating Xray template (bufferSize: 0, connIdle: 30, heartbeatPeriod: 2)..."
 mkdir -p /opt/alyan/templates
 cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
 {
@@ -97,10 +102,10 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
   "policy": {
     "levels": {
       "0": {
-        "handshake": 6,
-        "connIdle": 600,
-        "uplinkOnly": 2,
-        "downlinkOnly": 5,
+        "handshake": 4,
+        "connIdle": 30,
+        "uplinkOnly": 1,
+        "downlinkOnly": 1,
         "statsUserUplink": true,
         "statsUserDownlink": true,
         "statsUserOnline": true,
@@ -136,7 +141,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless"
+          "path": "/alyan-vless",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -156,7 +162,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess"
+          "path": "/alyan-vmess",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -176,7 +183,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan"
+          "path": "/alyan-trojan",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -298,7 +306,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
         "sockopt": {
           "tcpFastOpen": true,
           "tcpNoDelay": true,
-          "tcpKeepAliveIdle": 60,
+          "tcpKeepAliveIdle": 15,
           "tcpWindowClamp": 131072
         }
       }
@@ -727,7 +735,6 @@ if nr_tpl.exists():
     prev_nr = nr_out.read_text(encoding="utf-8") if nr_out.exists() else None
     nr_out.write_text(nr_tpl.read_text(encoding="utf-8").replace("{{DOMAIN}}", domain), encoding="utf-8")
     if subprocess.run(["nginx", "-t"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        # Fallback if custom nginx build rejects rcvbuf/sndbuf on listen
         fallback_txt = nr_tpl.read_text(encoding="utf-8").replace(" rcvbuf=64k sndbuf=64k", "").replace("{{DOMAIN}}", domain)
         nr_out.write_text(fallback_txt, encoding="utf-8")
 
@@ -741,8 +748,8 @@ if hap_tpl.exists():
             hap_out.write_text(prev_hap, encoding="utf-8")
 EOF_RENDER_ROUTERS
 
-# ─── [4/5] Update alyan-guard.py (Single-Instance Lock + Session-ID Engine) ──
-echo "[4/5] Updating alyan-guard.py with single-instance flock protection..."
+# ─── [4/5] Update alyan-guard.py (2-3s Instant Disconnect + Session-ID) ──────
+echo "[4/5] Updating alyan-guard.py with 2-3s instant disconnect engine..."
 mkdir -p /opt/alyan/services/guard
 cat <<'EOF_ALYAN_GUARD' > /opt/alyan/services/guard/alyan-guard.py
 #!/usr/bin/env python3
@@ -756,7 +763,10 @@ Continuously monitors SSH/Dropbear/WS-Proxy (/alyan) & Xray (VLESS/VMess/Trojan)
   5. Writes /run/alyan-live.json every 2s (including cached daemon health) for ultra-fast Webpanel sync.
 """
 import datetime as dt
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import ipaddress
 import json
 import os
@@ -1507,14 +1517,16 @@ def update_vless_user_sessions(
     now_ts: float,
 ) -> tuple[list[str], int]:
     """
-    Stateful VLESS Session-ID Engine:
+    Stateful VLESS Session-ID Engine with 2-3s Instant Disconnect Detection:
       - Assigns discrete Session IDs (S1, S2, S3...) per connected user on `uid`.
       - Binds 1 mobile phone's parallel WebSocket/gRPC/XHTTP streams into 1 Session ID:
           1) Same /16 IPv4 CGNAT subscriber pool or /56 IPv6 prefix -> same Session ID
           2) Dual-Stack (IPv4 + IPv6 simultaneously on 1 VoLTE SIM) -> merged into 1 Session ID
           3) Same /12 carrier superblock within 3.0s initial connection burst -> same Session ID
-          4) Seamless CGNAT IP handover when a session's previous IP closes in OnlineMap -> reuses Session ID
-      - Pins `primary_ip` per session so Connected IPs & Live Users stay rock-solid (1, 2, 3...) without flicker.
+          4) Seamless CGNAT IP handover when a session's previous IP closes -> reuses Session ID
+      - Ignores stale Xray OnlineMap entries once traffic & new stream handshakes stop
+        (because Xray's XUDPManager & connIdle hold disconnected IPs in OnlineMap for 3-4 min),
+        guaranteeing instant 2-3s offline transition when the user disconnects VLESS.
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
 
@@ -1525,13 +1537,16 @@ def update_vless_user_sessions(
 
     if active_traffic:
         XRAY_LAST_ACTIVE_TS[uid] = now_ts
-    idle_sec = now_ts - XRAY_LAST_ACTIVE_TS.get(uid, 0)
 
-    real_live_set = {ip for ip in live_om_ips if not is_trusted_cdn(ip)}
+    # Xray's OnlineMap (live_om_ips) retains disconnected IPs for 3-4 minutes due to XUDPManager
+    # (common/mux/session.go:196) and connIdle. Only treat OnlineMap IPs as active while bytes
+    # are actively flowing for this UUID; new stream handshakes come from recent_log_ips (<=2.2s).
+    active_om_ips = live_om_ips if active_traffic else []
+    real_live_set = {ip for ip in active_om_ips if not is_trusted_cdn(ip)}
     raw_real_cands: list[str] = []
     cdn_cands: list[str] = []
 
-    for ip in live_om_ips + recent_log_ips:
+    for ip in active_om_ips + recent_log_ips:
         if is_trusted_cdn(ip):
             if ip not in cdn_cands:
                 cdn_cands.append(ip)
@@ -1590,7 +1605,7 @@ def update_vless_user_sessions(
                         matched_sess = s
                         break
 
-            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed in OnlineMap while new IP opened)
+            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed while new IP opened)
             if matched_sess is None and online_map_ok:
                 recent_set = set(recent_log_ips)
                 for s in sessions.values():
@@ -1638,7 +1653,7 @@ def update_vless_user_sessions(
                     "last_seen": now_ts,
                     "_touched": True,
                 }
-    elif not sessions and cdn_cands and (active_traffic or bool(live_om_ips)):
+    elif not sessions and cdn_cands and active_traffic:
         # Only unwrapped CDN edge IPs visible -> collapse ALL CDN PoPs into 1 single session
         sessions["S-CDN"] = {
             "session_id": "S-CDN",
@@ -1652,21 +1667,20 @@ def update_vless_user_sessions(
             "last_seen": now_ts,
             "_touched": True,
         }
-    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(live_om_ips)):
+    elif sessions and cdn_cands and "S-CDN" in sessions and active_traffic:
         sessions["S-CDN"]["ips"].update(cdn_cands)
         sessions["S-CDN"]["last_seen"] = now_ts
+        sessions["S-CDN"]["_touched"] = True
 
-    live_all_set = set(live_om_ips)
+    live_all_set = set(active_om_ips) | set(recent_log_ips)
     for sid, s in list(sessions.items()):
-        s.pop("_touched", None)
+        touched = s.pop("_touched", False)
         has_open_stream = bool(s["ips"] & live_all_set)
-        if has_open_stream and (active_traffic or idle_sec <= 45.0):
-            s["last_seen"] = now_ts
-        elif len(sessions) == 1 and active_traffic:
+        if touched or has_open_stream or (len(sessions) == 1 and active_traffic):
             s["last_seen"] = now_ts
 
-        # Expire disconnected session cleanly after 4.5s without open stream or traffic
-        if (now_ts - s["last_seen"]) > 4.5:
+        # Expire disconnected session within 2-3s (1 cycle without traffic or new stream)
+        if (now_ts - s["last_seen"]) >= 1.5:
             sessions.pop(sid, None)
 
     if not sessions:
@@ -1729,7 +1743,7 @@ def poll_xray_stats_and_ips(
     now_ts = time.time()
     proto_socket_counts = scan_active_proto_sockets()
     om_by_uid, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
-    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=4.0)
+    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=2.5)
     recent_log_ips_by_uid: dict[str, list[str]] = {}
 
     if XRAY_ACCESS_LOG.exists():
@@ -1743,7 +1757,7 @@ def poll_xray_stats_and_ips(
                 if "accepted" not in ln or "email:" not in ln:
                     continue
                 log_ts = parse_xray_log_ts(ln)
-                if log_ts is None or (now_ts - log_ts) > 4.0 or (now_ts - log_ts) < -5.0:
+                if log_ts is None or (now_ts - log_ts) > 2.2 or (now_ts - log_ts) < -5.0:
                     continue
                 m_em = XRAY_EMAIL_RE.search(ln)
                 if not m_em:
@@ -2007,17 +2021,20 @@ def enforce_cycle():
 
 
 def main():
-    lock_f = open("/run/alyan-guard.lock", "w")
-    try:
-        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return
+    if fcntl is not None:
+        lock_f = open("/run/alyan-guard.lock", "w")
+        try:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
     while True:
+        t0 = time.monotonic()
         try:
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(2.0)
+        elapsed = time.monotonic() - t0
+        time.sleep(max(0.2, 2.0 - elapsed))
 
 
 if __name__ == "__main__":
@@ -2040,9 +2057,9 @@ pkill -9 -f "alyan-guard.py" >/dev/null 2>&1 || true
 systemctl start alyan-guard
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " ✅ VLESS EXACT 1:1 DATA COUNTING UPDATE APPLIED SUCCESSFULLY!"
-echo "    - Kernel TCP unsent buffer capped at 16 KB (was 4 GB / 64 MB)"
-echo "    - Xray internal pipe bufferSize set to 0 KB (was 4,096 KB)"
-echo "    - Nginx & HAProxy loopback sockets locked to 64 KB (matches SSH)"
+echo " ✅ VLESS 1:1 DATA & 2-3s INSTANT DISCONNECT UPDATE APPLIED!"
+echo "    - VLESS goes offline in 2-3 seconds after disconnect"
+echo "    - Exact 1:1 data counting (0 KB Xray buffer, 16 KB notsent_lowat)"
+echo "    - Session-ID live user counter & 2-decimal formatting active"
 echo "    - SSH (Dropbear & alyan-wsd) left 100% untouched"
 echo "════════════════════════════════════════════════════════════════════"
