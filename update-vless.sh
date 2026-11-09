@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+{
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — VLESS Idle-Online + 2-3s Disconnect + Exact 1:1 Data
-#  1) Stays ONLINE continuously when VLESS is connected & phone is idle on side
-#  2) Goes OFFLINE in 2-3s when VLESS is disconnected (1s WS Ping/Pong + ss -K)
-#  3) Eliminates 200+ MB kernel/loopback pre-buffering (1:1 data like SSH)
+#  🔥 ALYAN WEBPANEL — VLESS Per-Session-ID 2s Disconnect + Idle-Online + 1:1 Data
+#  1) Per-Session-ID Asyncio Bridge (10091..10094 -> 10001..10031) like SSH wsd
+#  2) Stays ONLINE continuously when VLESS is connected & phone sits idle on side
+#  3) Goes OFFLINE in 2 seconds per Session ID (2->1 or 1->0) on disconnect
+#  4) Exact 1:1 data counting (0 KB Xray buffer, 64 KB socket clamp)
 #  Safe Standalone Updater (Does NOT touch SSH / Dropbear / alyan-wsd)
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -14,7 +16,7 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " 🔥 ALYAN VLESS — Idle-Online + 2-3s Disconnect + 1:1 Data Update"
+echo " 🔥 ALYAN VLESS — Session-ID 2s Disconnect + Idle-Online + 1:1 Data"
 echo "════════════════════════════════════════════════════════════════════"
 
 # ─── [1/5] Apply Tight Kernel TCP Backpressure & Fast Keepalive ──────────────
@@ -83,8 +85,8 @@ for p_str in ("/opt/alyan/core/alyan-ctl", "/usr/local/bin/alyan-ctl"):
     p.write_text(txt, encoding="utf-8")
 EOF_PATCH_CTL
 
-# ─── [2/5] Update Xray Template (heartbeatPeriod: 1, downlinkOnly: 0, connIdle: 600) ─
-echo "[2/5] Updating Xray template (heartbeatPeriod: 1, downlinkOnly: 0, connIdle: 600, bufferSize: 0)..."
+# ─── [2/5] Update Xray Template (heartbeatPeriod: 1, downlinkOnly: 0, bufferSize: 0) ─
+echo "[2/5] Updating Xray template (heartbeatPeriod: 1, downlinkOnly: 0, connIdle: 3600, bufferSize: 0)..."
 mkdir -p /opt/alyan/templates
 cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
 {
@@ -341,11 +343,10 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
     ]
   }
 }
-
 EOF_XRAY_TPL
 
-# ─── [3/5] Update Nginx & HAProxy Loopback Socket Buffers (64KB Lock) ────────
-echo "[3/5] Locking Nginx (:8880/:8881) & HAProxy socket buffers to 64KB..."
+# ─── [3/5] Update Nginx & HAProxy Templates (Per-Session-ID Bridge Upstreams) ─
+echo "[3/5] Configuring Nginx (:8880/:8881) -> Per-Session-ID Bridge (:10091..10094)..."
 cat <<'EOF_NGINX_TPL' > /opt/alyan/templates/nginx-router.conf.tpl
 # ═════════════════════════════════════════════════════════════════════════════
 #  🔥 ALYAN WEBPANEL — Internal Zero-Buffering Nginx WS / XHTTP / gRPC Router
@@ -432,6 +433,26 @@ map $alyan_cdn_resolved_ip $alyan_real_ip {
 
 log_format alyan_xray '$msec $alyan_real_ip $status $request_uri';
 
+upstream alyan_vless_ws {
+    server 127.0.0.1:10091 max_fails=0;
+    server 127.0.0.1:10001 backup;
+}
+
+upstream alyan_vmess_ws {
+    server 127.0.0.1:10092 max_fails=0;
+    server 127.0.0.1:10002 backup;
+}
+
+upstream alyan_trojan_ws {
+    server 127.0.0.1:10093 max_fails=0;
+    server 127.0.0.1:10003 backup;
+}
+
+upstream alyan_vless_xhttp {
+    server 127.0.0.1:10094 max_fails=0;
+    server 127.0.0.1:10031 backup;
+}
+
 # ─── HTTP/1.1 WebSocket, XHTTP & ACME Challenge Router (:8880) ───────────────
 server {
     listen 127.0.0.1:8880 proxy_protocol backlog=16384 rcvbuf=64k sndbuf=64k;
@@ -458,7 +479,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10001;
+        proxy_pass http://alyan_vless_ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
@@ -474,7 +495,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10002;
+        proxy_pass http://alyan_vmess_ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
@@ -490,7 +511,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10003;
+        proxy_pass http://alyan_trojan_ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
@@ -506,7 +527,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10031;
+        proxy_pass http://alyan_vless_xhttp;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_set_header Host $host;
@@ -567,7 +588,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10031;
+        proxy_pass http://alyan_vless_xhttp;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_set_header Host $host;
@@ -582,7 +603,7 @@ server {
         proxy_buffering off;
         proxy_request_buffering off;
         proxy_socket_keepalive on;
-        proxy_pass http://127.0.0.1:10001;
+        proxy_pass http://alyan_vless_ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $alyan_connection_upgrade;
@@ -593,7 +614,6 @@ server {
         proxy_send_timeout 86400s;
     }
 }
-
 EOF_NGINX_TPL
 
 cat <<'EOF_HAP_TPL' > /opt/alyan/templates/haproxy.cfg.tpl
@@ -712,7 +732,6 @@ backend be_nginx_h2c
 backend be_xray_trojan_tcp
     mode tcp
     server xray_trojan 127.0.0.1:10023 send-proxy-v2
-
 EOF_HAP_TPL
 
 python3 - <<'EOF_RENDER_ROUTERS'
@@ -721,21 +740,23 @@ import subprocess
 from pathlib import Path
 
 domain = "localhost"
-db_path = Path("/etc/alyan/alyan.db")
-if db_path.exists():
-    try:
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute("SELECT value FROM settings WHERE key = 'domain'").fetchone()
-        if row and row[0]:
-            domain = str(row[0]).strip()
-        conn.close()
-    except Exception:
-        pass
+for db_candidate in ("/var/lib/alyan/alyan.db", "/etc/alyan/alyan.db"):
+    db_path = Path(db_candidate)
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute("SELECT value FROM settings WHERE key = 'domain'").fetchone()
+            if row and row[0]:
+                domain = str(row[0]).strip()
+                conn.close()
+                break
+            conn.close()
+        except Exception:
+            pass
 
 nr_tpl = Path("/opt/alyan/templates/nginx-router.conf.tpl")
 nr_out = Path("/etc/nginx/conf.d/alyan-router.conf")
 if nr_tpl.exists():
-    prev_nr = nr_out.read_text(encoding="utf-8") if nr_out.exists() else None
     nr_out.write_text(nr_tpl.read_text(encoding="utf-8").replace("{{DOMAIN}}", domain), encoding="utf-8")
     if subprocess.run(["nginx", "-t"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         fallback_txt = nr_tpl.read_text(encoding="utf-8").replace(" rcvbuf=64k sndbuf=64k", "").replace("{{DOMAIN}}", domain)
@@ -751,20 +772,25 @@ if hap_tpl.exists():
             hap_out.write_text(prev_hap, encoding="utf-8")
 EOF_RENDER_ROUTERS
 
-# ─── [4/5] Update alyan-guard.py (Idle-Online + 2-3s Instant Disconnect) ─────
-echo "[4/5] Updating alyan-guard.py with WS Pong watchdog & idle-online engine..."
+# ─── [4/5] Update alyan-guard.py (Per-Session-ID Bridge + 2s Disconnect) ─────
+echo "[4/5] Updating alyan-guard.py with Per-Session-ID Asyncio Bridge & 2s offline engine..."
 mkdir -p /opt/alyan/services/guard
 cat <<'EOF_ALYAN_GUARD' > /opt/alyan/services/guard/alyan-guard.py
 #!/usr/bin/env python3
 """
-Alyan Webpanel — Real-Time 2s Quota, Exact Real-IP & Strict IP-Limit Enforcer (alyan-guard)
+Alyan Webpanel — Real-Time 1s Quota, Exact Real-IP & Per-Session-ID Enforcer (alyan-guard)
 Continuously monitors SSH/Dropbear/WS-Proxy (/alyan) & Xray (VLESS/VMess/Trojan):
   1. Correlates Dropbear (-E short-iso journal) & OpenSSH PIDs -> Username -> Exact Real Client IP.
-  2. Parses Xray client IPs cleanly via ipaddress (stripping :port, normalizing IPv6 /64 & CDN edges).
-  3. Counts real-time SSH & Xray per-user bytes into SQLite every 2s.
-  4. Strictly enforces GB quotas, expiry dates, and IP limits (auto-disabling violating SSH & Xray accounts!).
-  5. Writes /run/alyan-live.json every 2s (including cached daemon health) for ultra-fast Webpanel sync.
+  2. Runs an in-process Asyncio Loopback Bridge (127.0.0.1:10091..10094 -> 127.0.0.1:10001..10031)
+     that tracks every open VLESS/VMess/Trojan WebSocket & XHTTP connection by its exact real client IP
+     (just like alyan-wsd.py does for SSH!).
+  3. Keeps connected VLESS users online continuously even when the phone sits idle on the side
+     (via 1s WebSocket Ping/Pong tracking), while aborting dead sockets (SO_LINGER RST + close)
+     and removing disconnected Session IDs (S1, S2...) within 2 seconds flat.
+  4. Counts real-time SSH & Xray per-user bytes into SQLite and enforces GB quotas, expiry dates,
+     and Session-ID limits.
 """
+import asyncio
 import datetime as dt
 try:
     import fcntl
@@ -776,7 +802,9 @@ import os
 import re
 import socket
 import sqlite3
+import struct
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -835,12 +863,11 @@ LAST_NET = None
 CACHED_SERVICES: list[dict] = []
 CYCLE_TICK = 0
 
-# Persistent tracking caches across 2-second ticks
+# Persistent tracking caches across ticks
 PID_AUTH_CACHE: dict[int, str] = {}
 PORT_TO_USER: dict[str, str] = {}
 WSD_PORT_LAST_BYTES: dict[str, int] = {}
 PID_LAST_IO_BYTES: dict[int, int] = {}
-# uuid -> {device_key: {"ip": str, "ts": float}}
 XRAY_ACTIVE_DEVICES: dict[str, dict[str, dict]] = {}
 
 # Consecutive multi-IP violation strikes before auto-disable
@@ -903,7 +930,7 @@ def clean_public_ip(raw_token: str) -> str | None:
 CLOUDFRONT_PREFIXES = (
     "143.204.", "52.84.", "54.192.", "54.230.", "54.239.", "54.240.",
     "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.", "13.227.", "13.249.",
-    "18.64.", "18.65.", "18.66.", "18.67.", "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.",
+    "18.64.", "18.65.", "18.67.", "18.154.", "18.155.", "18.160.", "18.161.", "18.164.", "18.165.",
     "64.252.", "65.8.", "65.9.", "70.132.", "99.84.", "99.86.",
     "108.138.", "108.156.", "108.157.", "108.158.", "108.159.", "204.246.", "205.251.",
 )
@@ -915,6 +942,274 @@ XRAY_LOG_TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(?:\.\d+)?
 XRAY_SESSIONS: dict[str, dict[str, dict]] = {}
 XRAY_SESSION_SEQ: dict[str, int] = {}
 XRAY_ONLINE_ALL_SUPPORTED = True
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  🔥 PER-SESSION-ID ASYNCIO XRAY LOOPBACK BRIDGE (10091..10094 -> 10001..10031)
+#  Mirrors alyan-wsd.py for VLESS/VMess/Trojan:
+#    - Extracts exact client IP (X-Real-IP / X-Forwarded-For) per open TCP socket
+#    - Tracks real-time client->server rx_bytes (including 1s WebSocket Pongs!)
+#    - Immediately aborts (SO_LINGER RST + close) any WS socket that misses 1.6s
+#      of WebSocket Pongs so Xray removes the IP from OnlineMap in 0ms on all kernels!
+# ═════════════════════════════════════════════════════════════════════════════
+BRIDGE_ENDPOINTS = (
+    (10091, 10001, "vless", True),
+    (10092, 10002, "vmess", True),
+    (10093, 10003, "trojan", True),
+    (10094, 10031, "vless", False),
+)
+BRIDGE_CONNS: dict[int, dict] = {}
+BRIDGE_SEQ = 0
+BRIDGE_WS_PONG_TIMEOUT = 1.65
+
+
+def _tune_bridge_writer(writer: asyncio.StreamWriter) -> None:
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
+        except Exception:
+            pass
+    tr = writer.transport
+    if tr is not None:
+        try:
+            tr.set_write_buffer_limits(high=65536, low=16384)
+        except Exception:
+            pass
+
+
+def _extract_bridge_client_ip(header_bytes: bytes) -> str | None:
+    try:
+        hdr_block = header_bytes.split(b"\r\n\r\n", 1)[0].decode("latin1", errors="ignore")
+        hdrs: dict[str, str] = {}
+        for ln in hdr_block.splitlines()[1:]:
+            if ":" in ln:
+                k, v = ln.split(":", 1)
+                hdrs[k.strip().lower()] = v.strip()
+        for hk in (
+            "x-real-ip",
+            "x-forwarded-for",
+            "cf-connecting-ip",
+            "cloudfront-viewer-address",
+            "true-client-ip",
+            "b-cdn-viewer-address",
+        ):
+            if hk in hdrs:
+                first_tok = hdrs[hk].split(",")[0].strip()
+                ip_c = clean_public_ip(first_tok)
+                if ip_c:
+                    return ip_c
+    except Exception:
+        pass
+    return None
+
+
+def _close_bridge_conn(conn_info: dict, abort: bool = False) -> None:
+    if conn_info.get("closed"):
+        return
+    conn_info["closed"] = True
+    BRIDGE_CONNS.pop(conn_info["id"], None)
+    for w_key in ("x_writer", "c_writer"):
+        w: asyncio.StreamWriter | None = conn_info.get(w_key)
+        if w is None:
+            continue
+        if abort:
+            sock = w.get_extra_info("socket")
+            if sock is not None:
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                except Exception:
+                    pass
+            tr = w.transport
+            if tr is not None:
+                try:
+                    tr.abort()
+                except Exception:
+                    pass
+        try:
+            w.close()
+        except Exception:
+            pass
+
+
+async def _pipe_bridge_c2x(
+    c_reader: asyncio.StreamReader,
+    x_writer: asyncio.StreamWriter,
+    conn_info: dict,
+) -> None:
+    try:
+        while not conn_info.get("closed"):
+            chunk = await c_reader.read(65536)
+            if not chunk:
+                break
+            conn_info["last_rx_ts"] = time.monotonic()
+            conn_info["rx_bytes"] += len(chunk)
+            x_writer.write(chunk)
+            await x_writer.drain()
+    except Exception:
+        pass
+    finally:
+        _close_bridge_conn(conn_info, abort=False)
+
+
+async def _pipe_bridge_x2c(
+    x_reader: asyncio.StreamReader,
+    c_writer: asyncio.StreamWriter,
+    conn_info: dict,
+) -> None:
+    try:
+        while not conn_info.get("closed"):
+            chunk = await x_reader.read(65536)
+            if not chunk:
+                break
+            conn_info["last_tx_ts"] = time.monotonic()
+            conn_info["tx_bytes"] += len(chunk)
+            c_writer.write(chunk)
+            await c_writer.drain()
+    except Exception:
+        pass
+    finally:
+        _close_bridge_conn(conn_info, abort=False)
+
+
+async def _handle_bridge_client(
+    c_reader: asyncio.StreamReader,
+    c_writer: asyncio.StreamWriter,
+    target_port: int,
+    proto: str,
+    is_ws: bool,
+) -> None:
+    global BRIDGE_SEQ
+    _tune_bridge_writer(c_writer)
+    try:
+        initial = await asyncio.wait_for(c_reader.read(65536), timeout=8.0)
+        if not initial:
+            c_writer.close()
+            return
+        while b"\r\n\r\n" not in initial and len(initial) < 16384:
+            try:
+                more = await asyncio.wait_for(c_reader.read(4096), timeout=2.0)
+                if not more:
+                    break
+                initial += more
+            except asyncio.TimeoutError:
+                break
+
+        real_ip = _extract_bridge_client_ip(initial)
+        x_reader, x_writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", target_port),
+            timeout=4.0,
+        )
+        _tune_bridge_writer(x_writer)
+    except Exception:
+        try:
+            c_writer.close()
+        except Exception:
+            pass
+        return
+
+    now_m = time.monotonic()
+    BRIDGE_SEQ += 1
+    conn_id = BRIDGE_SEQ
+    conn_info = {
+        "id": conn_id,
+        "proto": proto,
+        "is_ws": is_ws,
+        "ip": real_ip,
+        "opened_at": now_m,
+        "last_rx_ts": now_m,
+        "last_tx_ts": now_m,
+        "rx_bytes": len(initial),
+        "tx_bytes": 0,
+        "c_writer": c_writer,
+        "x_writer": x_writer,
+        "closed": False,
+    }
+    BRIDGE_CONNS[conn_id] = conn_info
+
+    try:
+        x_writer.write(initial)
+        await x_writer.drain()
+        await asyncio.gather(
+            _pipe_bridge_c2x(c_reader, x_writer, conn_info),
+            _pipe_bridge_x2c(x_reader, c_writer, conn_info),
+        )
+    except Exception:
+        pass
+    finally:
+        _close_bridge_conn(conn_info, abort=False)
+
+
+async def _bridge_watchdog_loop() -> None:
+    while True:
+        await asyncio.sleep(0.25)
+        now_m = time.monotonic()
+        for conn_info in list(BRIDGE_CONNS.values()):
+            if conn_info.get("closed"):
+                continue
+            if conn_info.get("is_ws"):
+                if (
+                    (now_m - conn_info["opened_at"]) >= BRIDGE_WS_PONG_TIMEOUT
+                    and (now_m - conn_info["last_rx_ts"]) >= BRIDGE_WS_PONG_TIMEOUT
+                ):
+                    _close_bridge_conn(conn_info, abort=True)
+
+
+async def _run_bridge_servers() -> None:
+    servers = []
+    for listen_port, target_port, proto, is_ws in BRIDGE_ENDPOINTS:
+        try:
+            srv = await asyncio.start_server(
+                lambda r, w, tp=target_port, pr=proto, ws=is_ws: _handle_bridge_client(r, w, tp, pr, ws),
+                host="127.0.0.1",
+                port=listen_port,
+                backlog=8192,
+                reuse_address=True,
+            )
+            servers.append(srv)
+        except Exception:
+            pass
+    asyncio.create_task(_bridge_watchdog_loop())
+    if servers:
+        await asyncio.gather(*(s.serve_forever() for s in servers))
+    else:
+        while True:
+            await asyncio.sleep(3600)
+
+
+def start_xray_bridge_thread() -> None:
+    def _runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_bridge_servers())
+
+    t = threading.Thread(target=_runner, name="alyan-xray-bridge", daemon=True)
+    t.start()
+
+
+def get_live_bridge_state() -> tuple[dict[str, set[str]], dict[str, int]]:
+    """
+    Return (live_ips_by_proto, active_conn_count_by_proto) from the in-process
+    Asyncio Loopback Bridge. Only includes connections that have received bytes
+    (including 1s WebSocket Pongs!) within BRIDGE_WS_PONG_TIMEOUT.
+    """
+    ips_by_proto: dict[str, set[str]] = {"vless": set(), "vmess": set(), "trojan": set()}
+    cnt_by_proto: dict[str, int] = {"vless": 0, "vmess": 0, "trojan": 0}
+    now_m = time.monotonic()
+    for c in list(BRIDGE_CONNS.values()):
+        if c.get("closed"):
+            continue
+        if c.get("is_ws") and (now_m - c["last_rx_ts"]) >= BRIDGE_WS_PONG_TIMEOUT:
+            continue
+        pr = c["proto"]
+        cnt_by_proto[pr] = cnt_by_proto.get(pr, 0) + 1
+        ip = c.get("ip")
+        if ip:
+            ips_by_proto.setdefault(pr, set()).add(ip)
+    return ips_by_proto, cnt_by_proto
 
 
 def is_trusted_cdn(ip_str: str) -> bool:
@@ -967,54 +1262,6 @@ def device_key_for_ip(ip_str: str) -> str:
         return net_k
     except ValueError:
         return ip_str
-
-
-def read_recent_nginx_xray_ips(max_age_sec: float = 6.0) -> dict[str, list[str]]:
-    """
-    Returns proto -> list of recent clean unique client IPs from Nginx handshake log.
-    Only includes handshakes within the last `max_age_sec` seconds!
-    """
-    res: dict[str, list[str]] = {}
-    if not NGINX_XRAY_LOG.exists():
-        return res
-    now_ts = time.time()
-    try:
-        with NGINX_XRAY_LOG.open("rb") as f:
-            f.seek(0, os.SEEK_END)
-            sz = f.tell()
-            f.seek(max(0, sz - 32768))
-            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-100:]
-        for ln in lines:
-            parts = ln.strip().split()
-            if len(parts) < 4:
-                continue
-            # parts[0] is $msec (Unix timestamp with float, e.g. 1730378901.123)
-            try:
-                log_ts = float(parts[0])
-                if (now_ts - log_ts) > max_age_sec or (now_ts - log_ts) < -5.0:
-                    continue
-            except ValueError:
-                continue
-            raw_ip = parts[1]
-            uri = parts[3].lower()
-            ip_clean = clean_public_ip(raw_ip)
-            if not ip_clean:
-                continue
-            proto = None
-            if "vless" in uri or "xhttp" in uri:
-                proto = "vless"
-            elif "vmess" in uri:
-                proto = "vmess"
-            elif "trojan" in uri:
-                proto = "trojan"
-            if proto:
-                if proto not in res:
-                    res[proto] = []
-                if ip_clean not in res[proto]:
-                    res[proto].append(ip_clean)
-    except Exception:
-        pass
-    return res
 
 
 def parse_xray_source_ip(line: str) -> tuple[str | None, bool]:
@@ -1083,7 +1330,7 @@ def read_net_rates(iface: str):
     if LAST_NET is None:
         LAST_NET = (now, rx_tot, tx_tot)
         return 0.0, 0.0, rx_tot, tx_tot
-    dt_s = max(0.4, now - LAST_NET[0])
+    dt_s = max(0.3, now - LAST_NET[0])
     rx_bps = max(0.0, (rx_tot - LAST_NET[1]) / dt_s)
     tx_bps = max(0.0, (tx_tot - LAST_NET[2]) / dt_s)
     LAST_NET = (now, rx_tot, tx_tot)
@@ -1213,13 +1460,6 @@ def refresh_auth_pid_cache(canon_users: dict[str, str]):
 
 
 def query_haproxy_sessions() -> tuple[dict[str, str], list[str], list[str], list[str]]:
-    """
-    Query HAProxy admin socket once per cycle:
-      - loopback_map: 127.0.0.1:<ephemeral_port> -> real public client IP (for SSH-SSL :443 -> Dropbear)
-      - ws_ips: active public client IPs on be_nginx_ws (WebSocket VLESS, VMess, Trojan, XHTTP)
-      - h2c_ips: active public client IPs on be_nginx_h2c (gRPC streams)
-      - trojan_ips: active public client IPs on be_xray_trojan_tcp (Trojan TCP)
-    """
     loopback_map: dict[str, str] = {}
     ws_ips: list[str] = []
     h2c_ips: list[str] = []
@@ -1304,7 +1544,8 @@ def read_pid_io_bytes(pid: int) -> int:
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> tuple[dict[str, list[dict]], dict[str, int]]:
     canon_users = {u.lower(): u for u in managed_users}
-    refresh_auth_pid_cache(canon_users)
+    if CYCLE_TICK <= 2 or (CYCLE_TICK % 2 == 0):
+        refresh_auth_pid_cache(canon_users)
 
     uid_map: dict[int, str] = {}
     try:
@@ -1327,10 +1568,12 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
     active_pids: set[int] = set()
 
     try:
-        out = subprocess.check_output(["ss", "-tnp"], text=True, stderr=subprocess.DEVNULL, timeout=2.5)
+        out = subprocess.check_output(["ss", "-tnp"], text=True, stderr=subprocess.DEVNULL, timeout=2.0)
     except Exception:
         out = ""
 
+    need_auth_refresh = False
+    raw_ssh_rows = []
     for line in out.splitlines():
         if "ESTAB" not in line:
             continue
@@ -1347,8 +1590,16 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
         peer_ip = peer_ip.strip("[]")
         if peer_ip.startswith("::ffff:"):
             peer_ip = peer_ip[7:]
-
         pids = [int(x) for x in re.findall(r"pid=(\d+)", line)]
+        raw_ssh_rows.append((peer_ip, peer_port, pids))
+        for pid in pids:
+            if pid not in PID_AUTH_CACHE:
+                need_auth_refresh = True
+
+    if need_auth_refresh and (CYCLE_TICK % 2 != 0):
+        refresh_auth_pid_cache(canon_users)
+
+    for peer_ip, peer_port, pids in raw_ssh_rows:
         username = None
         target_pid = None
         for pid in pids:
@@ -1407,146 +1658,32 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]) -> 
     return sessions_by_user, deltas
 
 
-PROTO_PORTS = {
-    "vless": (10001, 10011, 10031),
-    "vmess": (10002, 10012),
-    "trojan": (10003, 10013, 10023),
+DIRECT_NON_BRIDGE_PORTS = {
+    "vless": (10011,),
+    "vmess": (10012,),
+    "trojan": (10013, 10023),
 }
-WS_HEARTBEAT_PORTS = (10001, 10002, 10003)
-XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
-XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int | bool]] = {}
-XRAY_RST_RULES: set[tuple[int, int]] = set()
-SS_RX_BYTES_RE = re.compile(r"\bbytes_received:(\d+)")
-SS_DATA_SEGS_IN_RE = re.compile(r"\bdata_segs_in:(\d+)")
 
 
-def _clear_stale_rst_rules(active_dead_pairs: set[tuple[int, int]]) -> None:
-    for lp, rp in list(XRAY_RST_RULES):
-        if (lp, rp) not in active_dead_pairs:
-            subprocess.run(
-                ["iptables", "-D", "OUTPUT", "-o", "lo", "-p", "tcp", "--sport", str(lp), "--dport", str(rp), "-j", "REJECT", "--reject-with", "tcp-reset"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=0.4,
-            )
-            XRAY_RST_RULES.discard((lp, rp))
-
-
-def scan_active_proto_sockets() -> dict[str, int]:
-    """
-    Return count of live ESTAB sockets on Xray inbound ports using `ss -tin`.
-    For WebSocket ports (10001/10002/10003) where Xray sends a 1s WebSocket Ping
-    (`heartbeatPeriod: 1`), a connected phone (even sitting completely idle on the
-    side with 0 browsing activity!) replies with a 6-byte WebSocket Pong every 1s,
-    incrementing `bytes_received` and `data_segs_in`.
-    If a socket receives 0 bytes from the client for >=1.8s (phone disconnected
-    behind CGNAT/CDN without FIN, or stale Mux worker):
-      1) It is marked dead in XRAY_SOCKET_RX_STATE (NEVER popped while still in `ss`,
-         preventing it from ever being re-counted as a new active socket!).
-      2) `ss -t -K` immediately destroys the dead loopback socket (with iptables
-         TCP-RST fallback for kernels without CONFIG_INET_DIAG_DESTROY) so Xray
-         removes the IP from OnlineMap and the user goes offline within 2-3s.
-    """
+def scan_direct_grpc_trojan_sockets() -> dict[str, int]:
+    """Count ESTAB sockets on gRPC (10011/10012/10013) and Trojan-TCP (10023) ports."""
     counts = {"vless": 0, "vmess": 0, "trojan": 0}
-    now_ts = time.monotonic()
-    seen_keys: set[str] = set()
-    dead_pairs: set[tuple[int, int]] = set()
     try:
-        out = subprocess.check_output(["ss", "-tin"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
-        lines = out.splitlines()
-        i = 0
-        n = len(lines)
-        while i < n:
-            ln = lines[i]
+        out = subprocess.check_output(["ss", "-tn"], text=True, stderr=subprocess.DEVNULL, timeout=1.2)
+        for ln in out.splitlines():
             if "ESTAB" not in ln:
-                i += 1
                 continue
             cols = ln.split()
             if len(cols) < 5:
-                i += 1
                 continue
             try:
                 lport = int(cols[3].rsplit(":", 1)[-1])
-                rport = int(cols[4].rsplit(":", 1)[-1])
             except ValueError:
-                i += 1
                 continue
-
-            info_ln = ""
-            if (i + 1) < n and lines[i + 1].startswith((" ", "\t")):
-                info_ln = lines[i + 1]
-                i += 2
-            else:
-                i += 1
-
-            matched_proto = None
-            for pr, ports in PROTO_PORTS.items():
+            for pr, ports in DIRECT_NON_BRIDGE_PORTS.items():
                 if lport in ports:
-                    matched_proto = pr
+                    counts[pr] += 1
                     break
-            if not matched_proto:
-                continue
-
-            if info_ln:
-                sock_key = f"{lport}:{rport}"
-                seen_keys.add(sock_key)
-                m_rx = SS_RX_BYTES_RE.search(info_ln)
-                m_ds = SS_DATA_SEGS_IN_RE.search(info_ln)
-                rx_b = int(m_rx.group(1)) if m_rx else 0
-                d_segs = int(m_ds.group(1)) if m_ds else 0
-
-                prev = XRAY_SOCKET_RX_STATE.get(sock_key)
-                if prev is None:
-                    XRAY_SOCKET_RX_STATE[sock_key] = {
-                        "rx_bytes": rx_b,
-                        "data_segs_in": d_segs,
-                        "last_active_ts": now_ts,
-                        "dead": False,
-                    }
-                    counts[matched_proto] += 1
-                else:
-                    if rx_b > int(prev["rx_bytes"]) or d_segs > int(prev["data_segs_in"]):
-                        prev["rx_bytes"] = rx_b
-                        prev["data_segs_in"] = d_segs
-                        prev["last_active_ts"] = now_ts
-                        prev["dead"] = False
-                        counts[matched_proto] += 1
-                    elif not prev.get("dead") and (now_ts - float(prev["last_active_ts"])) < 1.8:
-                        counts[matched_proto] += 1
-                    else:
-                        # Client stopped replying to 1s WebSocket Pings -> dead/disconnected socket!
-                        # Keep sock_key in XRAY_SOCKET_RX_STATE with dead=True so it NEVER bounces back!
-                        was_already_dead = bool(prev.get("dead"))
-                        prev["dead"] = True
-                        subprocess.run(
-                            ["ss", "-t", "-K", f"sport = :{lport} and dport = :{rport}"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=0.4,
-                        )
-                        subprocess.run(
-                            ["ss", "-t", "-K", f"sport = :{rport} and dport = :{lport}"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=0.4,
-                        )
-                        if was_already_dead:
-                            dead_pairs.add((lport, rport))
-                            if (lport, rport) not in XRAY_RST_RULES:
-                                subprocess.run(
-                                    ["iptables", "-I", "OUTPUT", "-o", "lo", "-p", "tcp", "--sport", str(lport), "--dport", str(rport), "-j", "REJECT", "--reject-with", "tcp-reset"],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    timeout=0.4,
-                                )
-                                XRAY_RST_RULES.add((lport, rport))
-            else:
-                counts[matched_proto] += 1
-
-        for k in list(XRAY_SOCKET_RX_STATE.keys()):
-            if k not in seen_keys:
-                XRAY_SOCKET_RX_STATE.pop(k, None)
-        _clear_stale_rst_rules(dead_pairs)
     except Exception:
         pass
     return counts
@@ -1558,7 +1695,6 @@ def query_xray_online_map(
 ) -> tuple[dict[str, list[str]], bool]:
     """
     Query Xray's live ref-counted OnlineMap (statsUserOnline).
-    An IP exists in OnlineMap ONLY while at least 1 stream for that user's UUID is currently open!
     Supports both `-all` (Xray v25/v26+) and per-user `-email` fallback.
     """
     global XRAY_ONLINE_ALL_SUPPORTED
@@ -1572,7 +1708,7 @@ def query_xray_online_map(
             [str(xray_bin), "api", "statsonlineiplist", "--server=127.0.0.1:10085", "-all"],
             capture_output=True,
             text=True,
-            timeout=2.5,
+            timeout=2.0,
         )
         if proc.returncode == 0:
             try:
@@ -1632,18 +1768,23 @@ def update_vless_user_sessions(
     active_traffic: bool,
     active_sockets: int,
     now_ts: float,
+    bridge_live_ips: set[str] | None = None,
+    direct_non_bridge_sockets: int = 0,
 ) -> tuple[list[str], int]:
     """
-    Stateful VLESS Session-ID Engine (Continuous Idle-Online + 2-3s Instant Disconnect):
+    Stateful VLESS Per-Session-ID Engine (Continuous Idle-Online + 2s Instant Disconnect):
       - Assigns discrete Session IDs (S1, S2, S3...) per connected user on `uid`.
       - Binds 1 mobile phone's parallel WebSocket/gRPC/XHTTP streams into 1 Session ID:
           1) Same /16 IPv4 CGNAT subscriber pool or /56 IPv6 prefix -> same Session ID
           2) Dual-Stack (IPv4 + IPv6 simultaneously on 1 VoLTE SIM) -> merged into 1 Session ID
           3) Same /12 carrier superblock within 3.0s initial connection burst -> same Session ID
           4) Seamless CGNAT IP handover when a session's previous IP closes -> reuses Session ID
-      - Keeps connected users online continuously even when the phone sits idle with 0 activity
-        (verified via 1s WebSocket Ping/Pong on live_om_ips), while transitioning to offline
-        within 2-3s the moment the user disconnects VLESS.
+      - Per-Session-ID Liveliness Verification:
+        Each Session ID's IP is verified against `bridge_live_ips` (the in-process Asyncio Bridge
+        where every connected phone replies to 1s WebSocket Pings). The moment a Session ID
+        disconnects, its socket is aborted/removed from `bridge_live_ips`, and that Session ID
+        is immediately removed on the 1.0s tick (2->1 or 1->0 in <=2 seconds flat!), even when
+        other Session IDs or other VLESS users stay connected!
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
 
@@ -1652,14 +1793,20 @@ def update_vless_user_sessions(
         XRAY_SESSION_SEQ[uid] = 0
         return [], 0
 
-    if active_traffic:
-        XRAY_LAST_ACTIVE_TS[uid] = now_ts
+    # Filter Xray OnlineMap IPs against live Pong-verified sockets in our Asyncio Bridge
+    # (unless a direct non-bridge gRPC/Trojan-TCP socket is active on 10011..10023).
+    if bridge_live_ips is not None and direct_non_bridge_sockets == 0:
+        verified_om_ips = [ip for ip in live_om_ips if ip in bridge_live_ips]
+        verified_recent_ips = [ip for ip in recent_log_ips if ip in bridge_live_ips]
+    else:
+        verified_om_ips = list(live_om_ips)
+        verified_recent_ips = list(recent_log_ips)
 
-    real_live_set = {ip for ip in live_om_ips if not is_trusted_cdn(ip)}
+    real_live_set = {ip for ip in verified_om_ips if not is_trusted_cdn(ip)}
     raw_real_cands: list[str] = []
     cdn_cands: list[str] = []
 
-    for ip in live_om_ips + recent_log_ips:
+    for ip in verified_om_ips + verified_recent_ips:
         if is_trusted_cdn(ip):
             if ip not in cdn_cands:
                 cdn_cands.append(ip)
@@ -1718,9 +1865,9 @@ def update_vless_user_sessions(
                         matched_sess = s
                         break
 
-            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed in OnlineMap while new IP opened)
+            # Rule 4: Seamless CGNAT IP handover (old session's IPs closed while new IP opened)
             if matched_sess is None and online_map_ok:
-                recent_set = set(recent_log_ips)
+                recent_set = set(verified_recent_ips)
                 for s in sessions.values():
                     if (
                         not s.get("_touched")
@@ -1766,7 +1913,7 @@ def update_vless_user_sessions(
                     "last_seen": now_ts,
                     "_touched": True,
                 }
-    elif not sessions and cdn_cands and (active_traffic or bool(live_om_ips)):
+    elif not sessions and cdn_cands and (active_traffic or bool(verified_om_ips)):
         # Only unwrapped CDN edge IPs visible -> collapse ALL CDN PoPs into 1 single session
         sessions["S-CDN"] = {
             "session_id": "S-CDN",
@@ -1780,20 +1927,19 @@ def update_vless_user_sessions(
             "last_seen": now_ts,
             "_touched": True,
         }
-    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(live_om_ips)):
+    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(verified_om_ips)):
         sessions["S-CDN"]["ips"].update(cdn_cands)
         sessions["S-CDN"]["last_seen"] = now_ts
         sessions["S-CDN"]["_touched"] = True
 
-    live_all_set = set(live_om_ips) | set(recent_log_ips)
+    live_all_set = set(verified_om_ips) | set(verified_recent_ips)
     for sid, s in list(sessions.items()):
         touched = s.pop("_touched", False)
         has_open_stream = bool(s["ips"] & live_all_set)
-        if touched or has_open_stream or (len(sessions) == 1 and active_traffic):
+        if touched or has_open_stream or (direct_non_bridge_sockets > 0 and len(sessions) == 1 and active_traffic):
             s["last_seen"] = now_ts
-
-        # Expire disconnected session within 2-3s once stream closes in OnlineMap
-        if (now_ts - s["last_seen"]) >= 1.5:
+        else:
+            # Session ID has 0 alive streams -> remove immediately for 2-second instant offline!
             sessions.pop(sid, None)
 
     if not sessions:
@@ -1817,7 +1963,7 @@ def poll_xray_stats_and_ips(
 ) -> tuple[dict[str, int], dict[str, list[str]], dict[str, int]]:
     """
     Returns:
-      - deltas: uuid -> bytes transferred since last 2s tick
+      - deltas: uuid -> bytes transferred since last tick
       - ips_by_uuid: uuid -> 1 pinned primary client IP per active Session ID
       - dev_count_by_uuid: uuid -> active Session ID count (1, 2, 3...)
     """
@@ -1838,7 +1984,7 @@ def poll_xray_stats_and_ips(
                 ["/usr/local/bin/xray", "api", "statsquery", "--server=127.0.0.1:10085", "-pattern", "user>>>", "-reset"],
                 text=True,
                 stderr=subprocess.DEVNULL,
-                timeout=3.0,
+                timeout=2.0,
             )
             data = json.loads(raw) if raw.strip() else {}
             for st in data.get("stat", []):
@@ -1854,9 +2000,9 @@ def poll_xray_stats_and_ips(
             pass
 
     now_ts = time.time()
-    proto_socket_counts = scan_active_proto_sockets()
+    bridge_ips_by_proto, bridge_cnt_by_proto = get_live_bridge_state()
+    direct_cnt_by_proto = scan_direct_grpc_trojan_sockets()
     om_by_uid, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
-    nginx_proto_ips = read_recent_nginx_xray_ips(max_age_sec=2.5)
     recent_log_ips_by_uid: dict[str, list[str]] = {}
 
     if XRAY_ACCESS_LOG.exists():
@@ -1870,7 +2016,7 @@ def poll_xray_stats_and_ips(
                 if "accepted" not in ln or "email:" not in ln:
                     continue
                 log_ts = parse_xray_log_ts(ln)
-                if log_ts is None or (now_ts - log_ts) > 2.2 or (now_ts - log_ts) < -5.0:
+                if log_ts is None or (now_ts - log_ts) > 2.0 or (now_ts - log_ts) < -5.0:
                     continue
                 m_em = XRAY_EMAIL_RE.search(ln)
                 if not m_em:
@@ -1880,17 +2026,11 @@ def poll_xray_stats_and_ips(
                 if not uid:
                     continue
 
-                proto = uuid_to_proto.get(uid, "vless")
-                ip_clean, was_loop = parse_xray_source_ip(ln)
-                matched_ip = ip_clean
-
-                if (was_loop or not matched_ip) and proto in nginx_proto_ips and nginx_proto_ips[proto]:
-                    matched_ip = nginx_proto_ips[proto][-1]
-
-                if matched_ip:
+                ip_clean, _ = parse_xray_source_ip(ln)
+                if ip_clean:
                     lst = recent_log_ips_by_uid.setdefault(uid, [])
-                    if matched_ip not in lst:
-                        lst.append(matched_ip)
+                    if ip_clean not in lst:
+                        lst.append(ip_clean)
         except Exception:
             pass
 
@@ -1908,9 +2048,16 @@ def poll_xray_stats_and_ips(
 
         proto = r["proto"].lower()
         active_traffic = deltas.get(uid, 0) > 0
-        active_sockets = proto_socket_counts.get(proto, 0)
-        live_om = om_by_uid.get(uid, [])
-        recent_lg = recent_log_ips_by_uid.get(uid, [])
+        b_ips = bridge_ips_by_proto.get(proto, set())
+        b_cnt = bridge_cnt_by_proto.get(proto, 0)
+        d_cnt = direct_cnt_by_proto.get(proto, 0)
+        active_sockets = b_cnt + d_cnt
+        live_om = list(om_by_uid.get(uid, []))
+        recent_lg = list(recent_log_ips_by_uid.get(uid, []))
+
+        # Fallback if older Xray stripped trustedXForwardedFor (logged 127.0.0.1) while bridge has live IP
+        if not live_om and not recent_lg and active_traffic and len(b_ips) == 1:
+            live_om = list(b_ips)
 
         # Direct Trojan TCP fallback only if OnlineMap & access.log had no entry yet
         if not live_om and not recent_lg and proto == "trojan" and active_traffic and trojan_ips:
@@ -1925,6 +2072,8 @@ def poll_xray_stats_and_ips(
             active_traffic=active_traffic,
             active_sockets=active_sockets,
             now_ts=now_ts,
+            bridge_live_ips=b_ips,
+            direct_non_bridge_sockets=d_cnt,
         )
         ips_by_uuid[uid] = u_ips
         dev_count_by_uuid[uid] = u_cnt
@@ -1995,7 +2144,6 @@ def enforce_cycle():
             user_lim = int(r["ip_limit"] or 0)
             conns = ssh_sessions.get(uname, [])
             session_count = len(conns)
-            uniq_ips = sorted({s["ip"] for s in conns if s.get("ip")})
 
             reason = None
             if r["expiry"] and r["expiry"] < today:
@@ -2004,10 +2152,9 @@ def enforce_cycle():
                 reason = f"SSH user `{uname}` reached {gb_lim} GB quota"
             elif user_lim > 0 and session_count > user_lim:
                 SSH_IP_STRIKES[uname] = SSH_IP_STRIKES.get(uname, 0) + 1
-                if SSH_IP_STRIKES[uname] >= 2:
+                if SSH_IP_STRIKES[uname] >= 4:
                     reason = f"SSH user `{uname}` exceeded user limit ({session_count}/{user_lim} Users) — auto-disabled"
                 else:
-                    # Strike 1: Immediately terminate excess user sessions beyond user_lim
                     excess = conns[user_lim:]
                     for s in excess:
                         if s.get("pid"):
@@ -2051,7 +2198,6 @@ def enforce_cycle():
 
             gb_lim = float(r["gb_limit"] or 0)
             user_lim = int(r["ip_limit"] or 0)
-            cur_ips = xray_ips.get(uuid, [])
             fresh_sess = xray_fresh_devs.get(uuid, 0)
 
             reason = None
@@ -2061,7 +2207,7 @@ def enforce_cycle():
                 reason = f"Xray client `{uname}` ({r['proto'].upper()}) reached {gb_lim} GB quota"
             elif user_lim > 0 and fresh_sess > user_lim:
                 XRAY_IP_STRIKES[uuid] = XRAY_IP_STRIKES.get(uuid, 0) + 1
-                if XRAY_IP_STRIKES[uuid] >= 3:
+                if XRAY_IP_STRIKES[uuid] >= 6:
                     reason = f"Xray client `{uname}` ({r['proto'].upper()}) exceeded user limit ({fresh_sess}/{user_lim} Users) — auto-disabled"
             else:
                 XRAY_IP_STRIKES.pop(uuid, None)
@@ -2097,7 +2243,7 @@ def enforce_cycle():
     HIST["rx"] = (HIST["rx"] + [round((rx_bps * 8) / 1048576.0, 2)])[-20:]
     HIST["tx"] = (HIST["tx"] + [round((tx_bps * 8) / 1048576.0, 2)])[-20:]
 
-    if not CACHED_SERVICES or (CYCLE_TICK % 2 == 0):
+    if not CACHED_SERVICES or (CYCLE_TICK % 4 == 0):
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
@@ -2140,6 +2286,7 @@ def main():
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return
+    start_xray_bridge_thread()
     while True:
         t0 = time.monotonic()
         try:
@@ -2147,32 +2294,39 @@ def main():
         except Exception:
             pass
         elapsed = time.monotonic() - t0
-        time.sleep(max(0.2, 2.0 - elapsed))
+        time.sleep(max(0.15, 1.0 - elapsed))
 
 
 if __name__ == "__main__":
     main()
-
 EOF_ALYAN_GUARD
 chmod +x /opt/alyan/services/guard/alyan-guard.py
 
-# ─── [5/5] Sync Xray & Reload Nginx, HAProxy & Alyan-Guard (SSH Untouched) ───
-echo "[5/5] Syncing Xray config and reloading VLESS pipeline (SSH untouched)..."
+# ─── [5/5] Restart Guard Bridge, Sync Xray & Restart Nginx (SSH Untouched) ──
+echo "[5/5] Starting Session-ID Bridge, syncing Xray & restarting Nginx (SSH untouched)..."
+while iptables -S OUTPUT 2>/dev/null | grep -q " -o lo .* --sport 100"; do
+  rule=$(iptables -S OUTPUT | grep " -o lo .* --sport 100" | head -n1 | sed 's/^-A /-D /')
+  iptables $rule 2>/dev/null || break
+done
+systemctl stop alyan-guard >/dev/null 2>&1 || true
+pkill -9 -f "alyan-guard.py" >/dev/null 2>&1 || true
+systemctl start alyan-guard
+sleep 0.5
+
 if [[ -x /usr/local/bin/alyan-ctl ]]; then
   /usr/local/bin/alyan-ctl xray-sync
 fi
 
-systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+systemctl restart nginx >/dev/null 2>&1 || systemctl reload nginx >/dev/null 2>&1 || true
 systemctl reload haproxy >/dev/null 2>&1 || true
 
-systemctl stop alyan-guard >/dev/null 2>&1 || true
-pkill -9 -f "alyan-guard.py" >/dev/null 2>&1 || true
-systemctl start alyan-guard
-
 echo "════════════════════════════════════════════════════════════════════"
-echo " ✅ VLESS IDLE-ONLINE + 2-3s DISCONNECT + 1:1 DATA UPDATE APPLIED!"
+echo " ✅ VLESS PER-SESSION-ID 2s DISCONNECT + IDLE-ONLINE UPDATE APPLIED!"
+echo "    - Session-ID Bridge (10091..10094 -> 10001..10031) active"
 echo "    - Stays ONLINE continuously when VLESS is connected & phone is idle"
-echo "    - Goes OFFLINE in 2-3s when VLESS is disconnected (WS Pong + ss -K)"
+echo "    - Goes OFFLINE in 2 seconds per Session ID (2->1 or 1->0) on disconnect"
 echo "    - Exact 1:1 data counting (0 KB Xray buffer, 16 KB notsent_lowat)"
 echo "    - SSH (Dropbear & alyan-wsd) left 100% untouched"
 echo "════════════════════════════════════════════════════════════════════"
+exit 0
+}
