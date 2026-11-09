@@ -48,6 +48,7 @@ net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.tcp_keepalive_time = 15
 net.ipv4.tcp_keepalive_intvl = 3
 net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_retries2 = 5
 EOF_SYSCTL
 
 sysctl --system >/dev/null 2>&1 || true
@@ -62,6 +63,7 @@ sysctl -w net.ipv4.tcp_fin_timeout=5 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_keepalive_time=15 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_keepalive_intvl=3 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.tcp_keepalive_probes=3 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.tcp_retries2=5 >/dev/null 2>&1 || true
 
 # Patch alyan-ctl on VPS so future config syncs keep these exact sysctl values
 python3 - <<'EOF_PATCH_CTL'
@@ -1412,10 +1414,22 @@ PROTO_PORTS = {
 }
 WS_HEARTBEAT_PORTS = (10001, 10002, 10003)
 XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
-XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int]] = {}
+XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int | bool]] = {}
+XRAY_RST_RULES: set[tuple[int, int]] = set()
 SS_RX_BYTES_RE = re.compile(r"\bbytes_received:(\d+)")
 SS_DATA_SEGS_IN_RE = re.compile(r"\bdata_segs_in:(\d+)")
-SS_LASTRCV_RE = re.compile(r"\blastrcv:(\d+)")
+
+
+def _clear_stale_rst_rules(active_dead_pairs: set[tuple[int, int]]) -> None:
+    for lp, rp in list(XRAY_RST_RULES):
+        if (lp, rp) not in active_dead_pairs:
+            subprocess.run(
+                ["iptables", "-D", "OUTPUT", "-o", "lo", "-p", "tcp", "--sport", str(lp), "--dport", str(rp), "-j", "REJECT", "--reject-with", "tcp-reset"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=0.4,
+            )
+            XRAY_RST_RULES.discard((lp, rp))
 
 
 def scan_active_proto_sockets() -> dict[str, int]:
@@ -1425,13 +1439,18 @@ def scan_active_proto_sockets() -> dict[str, int]:
     (`heartbeatPeriod: 1`), a connected phone (even sitting completely idle on the
     side with 0 browsing activity!) replies with a 6-byte WebSocket Pong every 1s,
     incrementing `bytes_received` and `data_segs_in`.
-    If a socket receives 0 bytes from the client for >=2.2s (phone disconnected
-    behind CGNAT/CDN without FIN, or stale Mux worker), `ss -K` immediately destroys
-    the dead loopback socket so Xray removes the IP from OnlineMap within 2-3s.
+    If a socket receives 0 bytes from the client for >=1.8s (phone disconnected
+    behind CGNAT/CDN without FIN, or stale Mux worker):
+      1) It is marked dead in XRAY_SOCKET_RX_STATE (NEVER popped while still in `ss`,
+         preventing it from ever being re-counted as a new active socket!).
+      2) `ss -t -K` immediately destroys the dead loopback socket (with iptables
+         TCP-RST fallback for kernels without CONFIG_INET_DIAG_DESTROY) so Xray
+         removes the IP from OnlineMap and the user goes offline within 2-3s.
     """
     counts = {"vless": 0, "vmess": 0, "trojan": 0}
     now_ts = time.monotonic()
     seen_keys: set[str] = set()
+    dead_pairs: set[tuple[int, int]] = set()
     try:
         out = subprocess.check_output(["ss", "-tin"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
         lines = out.splitlines()
@@ -1468,15 +1487,13 @@ def scan_active_proto_sockets() -> dict[str, int]:
             if not matched_proto:
                 continue
 
-            if lport in WS_HEARTBEAT_PORTS and info_ln:
+            if info_ln:
                 sock_key = f"{lport}:{rport}"
                 seen_keys.add(sock_key)
                 m_rx = SS_RX_BYTES_RE.search(info_ln)
                 m_ds = SS_DATA_SEGS_IN_RE.search(info_ln)
-                m_lr = SS_LASTRCV_RE.search(info_ln)
                 rx_b = int(m_rx.group(1)) if m_rx else 0
                 d_segs = int(m_ds.group(1)) if m_ds else 0
-                lastrcv_ms = int(m_lr.group(1)) if m_lr else None
 
                 prev = XRAY_SOCKET_RX_STATE.get(sock_key)
                 if prev is None:
@@ -1484,41 +1501,52 @@ def scan_active_proto_sockets() -> dict[str, int]:
                         "rx_bytes": rx_b,
                         "data_segs_in": d_segs,
                         "last_active_ts": now_ts,
+                        "dead": False,
                     }
                     counts[matched_proto] += 1
                 else:
-                    if (
-                        rx_b > int(prev["rx_bytes"])
-                        or d_segs > int(prev["data_segs_in"])
-                        or (lastrcv_ms is not None and lastrcv_ms < 1800)
-                    ):
+                    if rx_b > int(prev["rx_bytes"]) or d_segs > int(prev["data_segs_in"]):
                         prev["rx_bytes"] = rx_b
                         prev["data_segs_in"] = d_segs
                         prev["last_active_ts"] = now_ts
+                        prev["dead"] = False
                         counts[matched_proto] += 1
-                    elif (now_ts - float(prev["last_active_ts"])) < 2.2:
+                    elif not prev.get("dead") and (now_ts - float(prev["last_active_ts"])) < 1.8:
                         counts[matched_proto] += 1
                     else:
                         # Client stopped replying to 1s WebSocket Pings -> dead/disconnected socket!
-                        XRAY_SOCKET_RX_STATE.pop(sock_key, None)
+                        # Keep sock_key in XRAY_SOCKET_RX_STATE with dead=True so it NEVER bounces back!
+                        was_already_dead = bool(prev.get("dead"))
+                        prev["dead"] = True
                         subprocess.run(
-                            ["ss", "-K", "src", "127.0.0.1", "sport", "=", f":{lport}", "dst", "127.0.0.1", "dport", "=", f":{rport}"],
+                            ["ss", "-t", "-K", f"sport = :{lport} and dport = :{rport}"],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             timeout=0.4,
                         )
                         subprocess.run(
-                            ["ss", "-K", "src", "127.0.0.1", "sport", "=", f":{rport}", "dst", "127.0.0.1", "dport", "=", f":{lport}"],
+                            ["ss", "-t", "-K", f"sport = :{rport} and dport = :{lport}"],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             timeout=0.4,
                         )
+                        if was_already_dead:
+                            dead_pairs.add((lport, rport))
+                            if (lport, rport) not in XRAY_RST_RULES:
+                                subprocess.run(
+                                    ["iptables", "-I", "OUTPUT", "-o", "lo", "-p", "tcp", "--sport", str(lport), "--dport", str(rport), "-j", "REJECT", "--reject-with", "tcp-reset"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=0.4,
+                                )
+                                XRAY_RST_RULES.add((lport, rport))
             else:
                 counts[matched_proto] += 1
 
         for k in list(XRAY_SOCKET_RX_STATE.keys()):
             if k not in seen_keys:
                 XRAY_SOCKET_RX_STATE.pop(k, None)
+        _clear_stale_rst_rules(dead_pairs)
     except Exception:
         pass
     return counts
