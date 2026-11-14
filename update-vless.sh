@@ -522,6 +522,7 @@ XRAY_ONLINE_ALL_SUPPORTED = False
 PREV_PROTO_ONLINE: dict[str, int] = {"vless": 0, "vmess": 0, "trojan": 0}
 UDP_KILL_TS_LIST: list[float] = []
 LAST_ACCEPT_BY_UID_NET: dict[str, dict[str, float]] = {}
+REAL_TCP_CLOSE_MONO: dict[str, list[float]] = {"vless": [], "vmess": [], "trojan": []}
 
 
 def is_trusted_cdn(ip_str: str) -> bool:
@@ -1026,18 +1027,21 @@ SS_LASTSND_RE = re.compile(r"\blastsnd:(\d+)")
 SS_LASTRCV_RE = re.compile(r"\blastrcv:(\d+)")
 
 
-def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, float]]:
+def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, float], dict[str, int]]:
     """
-    Option-1 Socket Scanner:
+    Option-1 Established Socket Scanner:
       1. Inspects all ESTAB sockets on Xray ports (`ss -tin`).
-      2. If a WebSocket on `:10001/:10002/:10003` has `bytes_sent <= 140` after `1.0s`,
-         it is a blocked UDP stream (only the 129-byte HTTP 101 Switching Protocols header
-         was sent because UDP is routed to `blackhole`). We immediately close ONLY that
-         specific blocked UDP socket (`ss -K sport = :lport dport = :rport`) so Xray never
-         holds 60-second UDP blackhole sockets in OnlineMap!
-      3. Real TCP streams (`bytes_sent > 140`) are NEVER touched while active or idle.
-      4. Tracks per-socket idle seconds using both byte counters and kernel `lastsnd`/`lastrcv`.
-      Returns (live_tcp_counts_by_proto, min_socket_idle_sec_by_proto).
+      2. Classifies sockets by `bytes_sent` (`tx_b`):
+         - `tx_b <= 240` after `1.2s`: Blocked UDP stream (`129-byte` HTTP 101 or `236-byte`
+           HTTP 101 + WS close frame rejected by Xray `blackhole`). Closed individually (`ss -K`)
+           and never counted as an active VPN session.
+         - `tx_b < 600` with `idle >= 1.2s`: Finished one-shot DNS `:53` query (`217..353` bytes).
+           Ignored so background DNS bursts never affect session state.
+         - `tx_b >= 600` (or nascent `tx_b > 140` with `idle < 1.2s`): Active established TCP
+           tunnel (`:443` / `:5228`). Counted in `live_counts` and NEVER touched while online.
+      3. Tracks when established TCP sockets (`tx_bytes >= 600`) close in `REAL_TCP_CLOSE_MONO`,
+         ignoring short DNS `:53` closes (`tx_bytes < 600`).
+      Returns (live_tcp_counts_by_proto, min_socket_idle_sec_by_proto, recent_real_tcp_closes_by_proto).
     """
     live_counts = {"vless": 0, "vmess": 0, "trojan": 0}
     min_idle_by_proto = {"vless": 9999.0, "vmess": 9999.0, "trojan": 9999.0}
@@ -1105,23 +1109,10 @@ def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, float]]:
                         "last_io_mono": now_mono - kern_idle,
                         "rx_bytes": rx_b,
                         "tx_bytes": tx_b,
+                        "proto": matched_proto,
                     }
-                    if tx_b <= 140 and kern_idle >= 1.0:
-                        UDP_KILL_TS_LIST.append(time.time())
-                        try:
-                            subprocess.run(
-                                ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=0.8,
-                            )
-                        except Exception:
-                            pass
-                        XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-                    elif tx_b > 140:
-                        live_counts[matched_proto] += 1
-                        if kern_idle < min_idle_by_proto[matched_proto]:
-                            min_idle_by_proto[matched_proto] = kern_idle
+                    age = kern_idle
+                    idle_sec = kern_idle
                 else:
                     if rx_b > int(prev["rx_bytes"]) or tx_b > int(prev["tx_bytes"]):
                         prev["rx_bytes"] = rx_b
@@ -1131,24 +1122,26 @@ def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, float]]:
                     age = max(now_mono - float(prev["first_seen"]), kern_idle)
                     idle_sec = max(now_mono - float(prev["last_io_mono"]), kern_idle)
 
-                    if tx_b <= 140:
-                        if age >= 1.0:
-                            # Blocked UDP stream (only 129-byte HTTP 101 sent) -> close ONLY this UDP socket
-                            UDP_KILL_TS_LIST.append(time.time())
-                            try:
-                                subprocess.run(
-                                    ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    timeout=0.8,
-                                )
-                            except Exception:
-                                pass
-                            XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-                    else:
-                        live_counts[matched_proto] += 1
-                        if idle_sec < min_idle_by_proto[matched_proto]:
-                            min_idle_by_proto[matched_proto] = idle_sec
+                if tx_b <= 240 and age >= 1.2:
+                    # Blocked UDP stream (129-byte HTTP 101 or 236-byte WS reject) -> close individually
+                    UDP_KILL_TS_LIST.append(time.time())
+                    try:
+                        subprocess.run(
+                            ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=0.8,
+                        )
+                    except Exception:
+                        pass
+                    XRAY_SOCKET_RX_STATE.pop(sock_key, None)
+                elif tx_b < 600 and idle_sec >= 1.2:
+                    # Finished one-shot DNS (:53) query (<600B) sitting idle -> do not count as active tunnel
+                    pass
+                elif tx_b >= 600 or (tx_b > 140 and idle_sec < 1.2):
+                    live_counts[matched_proto] += 1
+                    if idle_sec < min_idle_by_proto[matched_proto]:
+                        min_idle_by_proto[matched_proto] = idle_sec
             else:
                 live_counts[matched_proto] += 1
                 min_idle_by_proto[matched_proto] = 0.0
@@ -1157,14 +1150,26 @@ def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, float]]:
 
     for k in list(XRAY_SOCKET_RX_STATE.keys()):
         if k not in seen_keys:
-            XRAY_SOCKET_RX_STATE.pop(k, None)
+            prev_st = XRAY_SOCKET_RX_STATE.pop(k, None)
+            if prev_st and int(prev_st.get("tx_bytes", 0)) >= 600:
+                pr_name = str(prev_st.get("proto") or "vless")
+                if pr_name in REAL_TCP_CLOSE_MONO:
+                    REAL_TCP_CLOSE_MONO[pr_name].append(now_mono)
 
-    return live_counts, min_idle_by_proto
+    real_closed_by_proto: dict[str, int] = {}
+    for pr in ("vless", "vmess", "trojan"):
+        lst = [t for t in REAL_TCP_CLOSE_MONO.get(pr, []) if (now_mono - t) <= 2.5]
+        REAL_TCP_CLOSE_MONO[pr] = lst
+        real_closed_by_proto[pr] = len(lst)
+
+    return live_counts, min_idle_by_proto, real_closed_by_proto
 
 
 def kill_proto_zombie_sockets(proto: str):
     """When 0 users are online on `proto`, clean up any leftover dead CDN sockets via `ss -K`."""
     UDP_KILL_TS_LIST.append(time.time())
+    if proto in REAL_TCP_CLOSE_MONO:
+        REAL_TCP_CLOSE_MONO[proto].clear()
     for p_port in PROTO_PORTS.get(proto, ()):
         try:
             subprocess.run(
@@ -1275,25 +1280,32 @@ def update_vless_user_sessions(
     active_traffic: bool,
     active_sockets: int,
     min_socket_idle: float,
-    last_accept_by_net: dict[str, float],
-    om_ts_by_net: dict[str, int],
-    ws_closes_by_net: dict[str, list[float]],
+    real_closed_recent: int,
     now_ts: float,
 ) -> tuple[list[str], int]:
     """
     Option-1 Stateful VLESS Session-ID Engine (S1, S2, S3...):
       - Assigns 1 discrete Session ID per connected user on `uid` (supports 1, 3, 4, 10+ users).
-      - Keeps idle connected phones & YouTube buffering pauses 100% Online (`active_sockets > 0`).
+      - Keeps idle connected phones & YouTube buffering pauses 100% Online (`active_sockets > 0`),
+        completely ignoring short-lived DNS `:53` queries (`tx_bytes < 600`).
       - Drops disconnected sessions within 1-2s:
-          1) When all real TCP sockets (`bytes_sent > 140`) close (`active_sockets == 0`) -> instant clear.
-          2) When a phone clicks Disconnect, Android closes all active VPN sockets in a simultaneous
-             burst (`recent_burst_cnt >= active_sockets` or `tight_burst_cnt >= 5`), while any
-             remaining Cloudflare-held zombie sockets (`1, 2, 4...`) have been completely idle
-             (`min_socket_idle >= 1.2s`) and 0 traffic is flowing (`not active_traffic`).
+          1) When all established TCP sockets (`tx_bytes >= 600`) close (`active_sockets == 0`).
+          2) When a phone clicks Disconnect and at least 3+ established TCP sockets (`tx_bytes >= 600`)
+             close simultaneously leaving at most 1-2 idle Cloudflare-stuck sockets (`min_socket_idle >= 1.5s`).
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
 
-    if active_sockets == 0:
+    is_full_disconnect = (
+        active_sockets == 0
+        or (
+            not active_traffic
+            and (
+                (active_sockets == 1 and real_closed_recent >= 3 and min_socket_idle >= 1.5)
+                or (active_sockets == 2 and real_closed_recent >= 5 and min_socket_idle >= 2.0)
+            )
+        )
+    )
+    if is_full_disconnect:
         sessions.clear()
         XRAY_SESSION_SEQ[uid] = 0
         return [], 0
@@ -1301,51 +1313,8 @@ def update_vless_user_sessions(
     if active_traffic:
         XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
-    # Option-1 Full-Disconnect Burst Detector (when ALL remaining sockets have been idle >=1.2s and 0 traffic)
-    disconnected_nets: set[str] = set()
-    if min_socket_idle >= 1.2 and not active_traffic:
-        candidate_nets: set[str] = set()
-        for ip in live_om_ips + recent_log_ips:
-            if not is_trusted_cdn(ip):
-                try:
-                    _, nk, _ = ip_family_and_prefixes(ip)
-                    candidate_nets.add(nk)
-                except ValueError:
-                    pass
-        for s in sessions.values():
-            candidate_nets.update(s.get("net_keys", set()))
-
-        for net_k in candidate_nets:
-            close_list = ws_closes_by_net.get(net_k)
-            if not close_list:
-                continue
-            last_acc = last_accept_by_net.get(net_k, 0.0)
-            om_ts = om_ts_by_net.get(net_k, 0)
-            closes_after_acc = [t for t in close_list if t > (last_acc + 0.5)]
-            if not closes_after_acc:
-                continue
-            latest_close = max(closes_after_acc)
-            recent_burst_cnt = sum(1 for t in closes_after_acc if (latest_close - t) <= 2.5)
-            tight_burst_cnt = sum(1 for t in closes_after_acc if (latest_close - t) <= 0.35)
-            if (
-                int(latest_close) >= int(om_ts)
-                and 0.20 <= (now_ts - latest_close) <= 10.0
-                and recent_burst_cnt >= 2
-                and (recent_burst_cnt >= active_sockets or tight_burst_cnt >= 5)
-            ):
-                disconnected_nets.add(net_k)
-
-    def _is_ip_disconnected(ip_s: str) -> bool:
-        if is_trusted_cdn(ip_s):
-            return False
-        try:
-            _, nk, _ = ip_family_and_prefixes(ip_s)
-            return nk in disconnected_nets
-        except ValueError:
-            return False
-
-    filtered_om_ips = [ip for ip in live_om_ips if not _is_ip_disconnected(ip)]
-    filtered_recent_ips = [ip for ip in recent_log_ips if not _is_ip_disconnected(ip)]
+    filtered_om_ips = list(live_om_ips)
+    filtered_recent_ips = list(recent_log_ips)
 
     effective_recent_ips = filtered_recent_ips if (not online_map_ok or bool(filtered_om_ips)) else []
     real_live_set = {ip for ip in filtered_om_ips if not is_trusted_cdn(ip)}
@@ -1476,14 +1445,11 @@ def update_vless_user_sessions(
     live_all_set = set(filtered_om_ips)
     for sid, s in list(sessions.items()):
         s.pop("_touched", None)
-        if s.get("net_keys") and (s["net_keys"] & disconnected_nets):
-            sessions.pop(sid, None)
-            continue
         has_open_stream = bool(s["ips"] & live_all_set)
-        if has_open_stream:
+        if has_open_stream or (not live_all_set and len(sessions) == 1 and active_sockets > 0):
             s["last_seen"] = now_ts
-        elif online_map_ok:
-            # Stream closed in OnlineMap -> remove session immediately (0s delay!)
+        elif online_map_ok and live_all_set:
+            # Multi-user stream closed in OnlineMap while other user(s) remain active
             sessions.pop(sid, None)
             continue
 
@@ -1542,9 +1508,8 @@ def poll_xray_stats_and_ips(
             pass
 
     now_ts = time.time()
-    proto_socket_counts, proto_min_idle = scan_active_proto_sockets()
-    om_by_uid, om_ts_by_uid_net, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
-    ws_closes_by_net = read_nginx_ws_close_timestamps(lookback_sec=30.0)
+    proto_socket_counts, proto_min_idle, proto_real_closed = scan_active_proto_sockets()
+    om_by_uid, _, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
     recent_log_ips_by_uid: dict[str, list[str]] = {}
 
     if XRAY_ACCESS_LOG.exists():
@@ -1602,6 +1567,7 @@ def poll_xray_stats_and_ips(
         active_traffic = deltas.get(uid, 0) > 0
         active_sockets = proto_socket_counts.get(proto, 0)
         min_sock_idle = proto_min_idle.get(proto, 9999.0)
+        real_closed_rec = proto_real_closed.get(proto, 0)
         live_om = om_by_uid.get(uid, [])
         recent_lg = recent_log_ips_by_uid.get(uid, [])
 
@@ -1617,9 +1583,7 @@ def poll_xray_stats_and_ips(
             active_traffic=active_traffic,
             active_sockets=active_sockets,
             min_socket_idle=min_sock_idle,
-            last_accept_by_net=LAST_ACCEPT_BY_UID_NET.get(uid, {}),
-            om_ts_by_net=om_ts_by_uid_net.get(uid, {}),
-            ws_closes_by_net=ws_closes_by_net,
+            real_closed_recent=real_closed_rec,
             now_ts=now_ts,
         )
         ips_by_uuid[uid] = u_ips
