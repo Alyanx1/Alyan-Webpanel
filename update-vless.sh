@@ -155,7 +155,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10001,
       "protocol": "vless",
       "settings": {
-        "clients": __VLESS_CLIENTS__,
+        "clients": {{VLESS_CLIENTS}},
         "decryption": "none"
       },
       "streamSettings": {
@@ -176,7 +176,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10002,
       "protocol": "vmess",
       "settings": {
-        "clients": __VMESS_CLIENTS__
+        "clients": {{VMESS_CLIENTS}}
       },
       "streamSettings": {
         "network": "ws",
@@ -196,7 +196,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10003,
       "protocol": "trojan",
       "settings": {
-        "clients": __TROJAN_CLIENTS__
+        "clients": {{TROJAN_CLIENTS}}
       },
       "streamSettings": {
         "network": "ws",
@@ -216,7 +216,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10011,
       "protocol": "vless",
       "settings": {
-        "clients": __VLESS_CLIENTS__,
+        "clients": {{VLESS_CLIENTS}},
         "decryption": "none"
       },
       "streamSettings": {
@@ -236,7 +236,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10012,
       "protocol": "vmess",
       "settings": {
-        "clients": __VMESS_CLIENTS__
+        "clients": {{VMESS_CLIENTS}}
       },
       "streamSettings": {
         "network": "grpc",
@@ -255,7 +255,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10013,
       "protocol": "trojan",
       "settings": {
-        "clients": __TROJAN_CLIENTS__
+        "clients": {{TROJAN_CLIENTS}}
       },
       "streamSettings": {
         "network": "grpc",
@@ -274,7 +274,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10023,
       "protocol": "trojan",
       "settings": {
-        "clients": __TROJAN_CLIENTS__
+        "clients": {{TROJAN_CLIENTS}}
       },
       "streamSettings": {
         "network": "tcp",
@@ -292,7 +292,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "port": 10031,
       "protocol": "vless",
       "settings": {
-        "clients": __VLESS_CLIENTS__,
+        "clients": {{VLESS_CLIENTS}},
         "decryption": "none"
       },
       "streamSettings": {
@@ -1711,7 +1711,7 @@ chmod 0755 /opt/alyan/services/guard/alyan-guard.py
 # ─── [6/6] Sync Xray Config & Restart Services Cleanly ───────────────────────
 echo "[6/6] Syncing Xray config & restarting services..."
 if [[ -x /usr/local/bin/alyan-ctl ]]; then
-  /usr/local/bin/alyan-ctl xray-sync >/dev/null 2>&1 || true
+  /usr/local/bin/alyan-ctl --actor cli xray-sync >/dev/null 2>&1 || true
 fi
 systemctl restart xray alyan-guard
 echo "════════════════════════════════════════════════════════════════════"
