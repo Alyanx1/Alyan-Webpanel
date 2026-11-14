@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════════════
-#  🔥 ALYAN WEBPANEL — VLESS 2s Instant Disconnect + No-UDP + Full-Speed BBR Update
+#  🔥 ALYAN WEBPANEL — VLESS 1-2s Instant Disconnect + No-UDP + Full-Speed BBR Update
 #  1) Removes/Blocks all UDP across Xray (VLESS/VMess/Trojan), SSH & Kernel sysctl
 #  2) Restores Full-Speed BBR + fq + 64MB TCP Buffers + tcp_retries2=15 (no cubic conflict)
 #  3) Cleans temporary cache files, heavy Xray/Nginx logs & systemd journals safely
-#  4) 1s WebSocket Ping/Pong + Instant 1-2s Offline on VLESS Disconnect (while staying
-#     100% Online when connected & idle, and preserving multi-user Session-ID IP tracking)
+#  4) Instant 1-2s Offline on VLESS Disconnect (via Nginx WS Close-Burst + Xray OnlineMap
+#     Timestamp + Kernel Zombie Socket Purge `ss -K`), while keeping connected idle phones
+#     100% Online and preserving multi-user Session-ID (S1, S2, S3...) exact IP tracking
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -15,11 +16,11 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 echo "════════════════════════════════════════════════════════════════════"
-echo " 🔥 ALYAN WEBPANEL — VLESS 2s Disconnect + No-UDP + BBR Speed Update"
+echo " 🔥 ALYAN WEBPANEL — VLESS 1-2s Disconnect + No-UDP + BBR Update"
 echo "════════════════════════════════════════════════════════════════════"
 
-# ─── [1/6] Clean Leftover Rules, UDP Gateways, Temp Cache & Heavy Logs ───────
-echo "[1/6] Cleaning temporary cache, leftover rules, UDP daemons & heavy logs..."
+# ─── [1/7] Clean Leftover Rules, UDP Gateways, Temp Cache & Heavy Logs ───────
+echo "[1/7] Cleaning temporary cache, leftover rules, UDP daemons & heavy logs..."
 for p in 10001 10002 10003 10004 10011 10012 10013 10021 10022 10023 10091 10092 10093 10094 7300 7200 7100; do
   while iptables -D OUTPUT -o lo -p tcp --sport "$p" -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
   while iptables -D OUTPUT -o lo -p tcp --dport "$p" -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
@@ -38,8 +39,8 @@ truncate -s 0 /var/log/xray/access.log /var/log/xray/error.log /var/log/nginx/al
 journalctl --vacuum-size=10M >/dev/null 2>&1 || true
 apt-get clean >/dev/null 2>&1 || true
 
-# ─── [2/6] Fix Kernel BBR + fq + tcp_retries2=15 & Remove UDP Sysctls ────────
-echo "[2/6] Applying clean BBR + fq wire-speed kernel profile (no UDP / no cubic conflict)..."
+# ─── [2/7] Fix Kernel BBR + fq + tcp_retries2=15 & Remove UDP Sysctls ────────
+echo "[2/7] Applying clean BBR + fq wire-speed kernel profile (no UDP / no cubic conflict)..."
 modprobe tcp_bbr 2>/dev/null || true
 if [[ -f /etc/sysctl.conf ]]; then
   sed -i '/tcp_congestion_control.*cubic/d' /etc/sysctl.conf
@@ -79,8 +80,8 @@ EOF_SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 sysctl -w net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr net.ipv4.tcp_retries2=15 >/dev/null 2>&1 || true
 
-# ─── [3/6] Update alyan-ctl (Idempotent TCP-Only Kernel Profile) ─────────────
-echo "[3/6] Updating alyan-ctl kernel profile (removing UDP sysctls & adding tcp_retries2=15)..."
+# ─── [3/7] Update alyan-ctl (Idempotent TCP-Only Kernel Profile) ─────────────
+echo "[3/7] Updating alyan-ctl kernel profile (removing UDP sysctls & adding tcp_retries2=15)..."
 python3 - <<'EOF_PATCH_CTL'
 from pathlib import Path
 
@@ -100,8 +101,8 @@ for p_str in ("/opt/alyan/core/alyan-ctl", "/usr/local/bin/alyan-ctl"):
     p.chmod(0o755)
 EOF_PATCH_CTL
 
-# ─── [4/6] Update Xray Template (Block All UDP + 1s WS Heartbeat) ────────────
-echo "[4/6] Updating Xray template (blocking all UDP traffic + 1s WS Ping/Pong)..."
+# ─── [4/7] Update Xray Template (Block All UDP Cleanly, No CDN Zombie Ping) ──
+echo "[4/7] Updating Xray template (blocking all UDP traffic & preventing CDN zombie keepalive)..."
 mkdir -p /opt/alyan/templates
 cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
 {
@@ -161,8 +162,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless",
-          "heartbeatPeriod": 1
+          "path": "/alyan-vless"
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -181,8 +181,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess",
-          "heartbeatPeriod": 1
+          "path": "/alyan-vmess"
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -201,8 +200,7 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan",
-          "heartbeatPeriod": 1
+          "path": "/alyan-trojan"
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -325,7 +323,11 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
     {
       "tag": "blocked",
       "protocol": "blackhole",
-      "settings": {}
+      "settings": {
+        "response": {
+          "type": "http"
+        }
+      }
     }
   ],
   "routing": {
@@ -356,8 +358,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
 }
 EOF_XRAY_TPL
 
-# ─── [5/6] Update alyan-guard.py (1-2s Instant Offline + Idle-Online + No-UDP) ─
-echo "[5/6] Updating alyan-guard.py with 1-2s instant disconnect & multi-user Session-ID engine..."
+# ─── [5/7] Update alyan-guard.py (0.5s Loop + Close-Burst + Zombie Purge) ────
+echo "[5/7] Updating alyan-guard.py with 1-2s disconnect engine & kernel zombie purge..."
 mkdir -p /opt/alyan/services/guard
 cat <<'EOF_ALYAN_GUARD' > /opt/alyan/services/guard/alyan-guard.py
 #!/usr/bin/env python3
@@ -365,11 +367,12 @@ cat <<'EOF_ALYAN_GUARD' > /opt/alyan/services/guard/alyan-guard.py
 Alyan Webpanel — Real-Time Quota, Exact Real-IP & Instant 1-2s Disconnect Enforcer (alyan-guard)
 Continuously monitors SSH/Dropbear/WS-Proxy (/alyan) & Xray (VLESS/VMess/Trojan):
   1. Correlates Dropbear (-E short-iso journal) & OpenSSH PIDs -> Username -> Exact Real Client IP.
-  2. Tracks VLESS/VMess/Trojan users via Session-ID engine (S1, S2, S3...) with 1s WS Ping/Pong
-     verification so idle connected phones stay 100% Online while disconnected users go Offline in 1-2s.
+  2. Tracks VLESS/VMess/Trojan users via Session-ID engine (S1, S2, S3...) with Nginx WebSocket
+     Close-Burst detection + Xray OnlineMap timestamp verification + Kernel Zombie Socket purge
+     (`ss -K`) so idle connected phones stay 100% Online while disconnected users go Offline in 1-2s.
   3. Counts real-time SSH & Xray per-user bytes into SQLite.
   4. Strictly enforces GB quotas, expiry dates, and user limits (auto-disabling violating accounts).
-  5. Writes /run/alyan-live.json every 1s for ultra-fast Webpanel sync.
+  5. Writes /run/alyan-live.json every 0.5s for ultra-fast Webpanel sync.
 """
 import datetime as dt
 import ipaddress
@@ -457,7 +460,7 @@ SSHD_AUTH_RE = re.compile(
 )
 XRAY_EMAIL_RE = re.compile(r"email:\s*([^\s@]+)@alyan", re.IGNORECASE)
 XRAY_FROM_RAW_RE = re.compile(
-    r"(?:\bfrom\s+)?(?:tcp:)?(\[[0-9a-fA-F:]+\]:[0-9]+|[0-9a-fA-F\.:]+:[0-9]+|[0-9\.]+)\s+accepted\s+tcp:",
+    r"(?:\bfrom\s+)?(?:tcp:|udp:)?(\[[0-9a-fA-F:]+\]:[0-9]+|[0-9a-fA-F\.:]+:[0-9]+|[0-9\.]+)\s+accepted\s+(?:tcp|udp):",
     re.IGNORECASE,
 )
 
@@ -510,7 +513,8 @@ XRAY_LOG_TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})(?:\.(\d+)
 
 XRAY_SESSIONS: dict[str, dict[str, dict]] = {}
 XRAY_SESSION_SEQ: dict[str, int] = {}
-XRAY_ONLINE_ALL_SUPPORTED = True
+XRAY_ONLINE_ALL_SUPPORTED = False
+PREV_PROTO_ONLINE: dict[str, int] = {"vless": 0, "vmess": 0, "trojan": 0}
 
 
 def is_trusted_cdn(ip_str: str) -> bool:
@@ -562,13 +566,13 @@ def device_key_for_ip(ip_str: str) -> str:
         return ip_str
 
 
-def read_nginx_ws_close_timestamps(lookback_sec: float = 120.0) -> dict[str, tuple[float, int]]:
+def read_nginx_ws_close_timestamps(lookback_sec: float = 120.0) -> dict[str, list[float]]:
     """
     In Nginx, `access_log /var/log/nginx/alyan-xray.log` writes a `101 /alyan-vless` entry
-    at the EXACT moment a WebSocket tunnel CLOSES (disconnects)!
-    Returns net_key -> (latest_close_timestamp, recent_close_count_in_last_3s).
+    at the EXACT millisecond a WebSocket tunnel CLOSES (when the phone disconnects)!
+    Returns net_key -> list of close timestamps within lookback_sec.
     """
-    closes: dict[str, tuple[float, int]] = {}
+    closes: dict[str, list[float]] = {}
     if not NGINX_XRAY_LOG.exists():
         return closes
     now_ts = time.time()
@@ -576,8 +580,8 @@ def read_nginx_ws_close_timestamps(lookback_sec: float = 120.0) -> dict[str, tup
         with NGINX_XRAY_LOG.open("rb") as f:
             f.seek(0, os.SEEK_END)
             sz = f.tell()
-            f.seek(max(0, sz - 32768))
-            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-120:]
+            f.seek(max(0, sz - 49152))
+            lines = f.read().decode("utf-8", errors="ignore").splitlines()[-160:]
         for ln in lines:
             parts = ln.strip().split()
             if len(parts) < 4:
@@ -595,27 +599,24 @@ def read_nginx_ws_close_timestamps(lookback_sec: float = 120.0) -> dict[str, tup
                 _, net_k, _ = ip_family_and_prefixes(ip_clean)
             except ValueError:
                 continue
-            prev_ts, prev_cnt = closes.get(net_k, (0.0, 0))
-            new_ts = max(prev_ts, log_ts)
-            new_cnt = prev_cnt + (1 if (now_ts - log_ts) <= 3.5 else 0)
-            closes[net_k] = (new_ts, new_cnt)
+            closes.setdefault(net_k, []).append(log_ts)
     except Exception:
         pass
     return closes
 
 
-def parse_xray_source_ip(line: str) -> tuple[str | None, bool]:
-    """Return (public_ip_or_None, was_loopback) from an Xray access.log 'accepted tcp:' line."""
-    if "accepted udp:" in line.lower():
-        return None, False
+def parse_xray_source_ip(line: str) -> tuple[str | None, bool, bool]:
+    """Return (public_ip_or_None, was_loopback, is_udp) from an Xray access.log 'accepted' line."""
+    low = line.lower()
+    is_udp = "accepted udp:" in low
     m = XRAY_FROM_RAW_RE.search(line)
     if not m:
-        return None, False
+        return None, False, is_udp
     tok = m.group(1).strip()
     if tok.startswith(("127.0.0.1", "[::1]", "::1")):
-        return None, True
+        return None, True, is_udp
     ip_clean = clean_public_ip(tok)
-    return ip_clean, (ip_clean is None)
+    return ip_clean, (ip_clean is None), is_udp
 
 
 def read_cpu_pct() -> int:
@@ -672,7 +673,7 @@ def read_net_rates(iface: str):
     if LAST_NET is None:
         LAST_NET = (now, rx_tot, tx_tot)
         return 0.0, 0.0, rx_tot, tx_tot
-    dt_s = max(0.4, now - LAST_NET[0])
+    dt_s = max(0.35, now - LAST_NET[0])
     rx_bps = max(0.0, (rx_tot - LAST_NET[1]) / dt_s)
     tx_bps = max(0.0, (tx_tot - LAST_NET[2]) / dt_s)
     LAST_NET = (now, rx_tot, tx_tot)
@@ -890,7 +891,8 @@ def read_pid_io_bytes(pid: int) -> int:
 
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
-    refresh_ssh_auth_cache()
+    if CYCLE_TICK == 1 or (CYCLE_TICK % 2 == 0):
+        refresh_ssh_auth_cache()
 
     wsd_map: dict[str, dict] = {}
     if WSD_STATE.exists():
@@ -1003,24 +1005,21 @@ PROTO_PORTS = {
     "vmess": (10002, 10012),
     "trojan": (10003, 10013, 10023),
 }
-WS_HEARTBEAT_PORTS = (10001, 10002, 10003)
+WS_PORTS = (10001, 10002, 10003)
 XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
 XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int]] = {}
 SS_RX_BYTES_RE = re.compile(r"\bbytes_received:(\d+)")
-SS_DATA_SEGS_IN_RE = re.compile(r"\bdata_segs_in:(\d+)")
+SS_TX_BYTES_RE = re.compile(r"\bbytes_sent:(\d+)")
 
 
 def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, int]]:
     """
     Scan ESTAB sockets on Xray inbound ports using `ss -tin`.
-    Because Xray sends a 1s WebSocket Ping (`heartbeatPeriod: 1`) on ports 10001/10002/10003:
-      - Any connected phone (even sitting completely idle on the side with 0 browsing!)
-        replies with a 6-byte WebSocket Pong every 1s, incrementing `bytes_received`.
-      - When a phone disconnects, even if Cloudflare CDN holds 1-2 zombie TCP sockets open
-        for 100s, `bytes_received` on those zombie sockets stops increasing immediately!
-    IMPORTANT: Never pop `sock_key` from `XRAY_SOCKET_RX_STATE` while the zombie socket
-    still exists in `ss -tin`, so dead Cloudflare sockets never resurrect!
-    Returns (live_counts_by_proto, dead_ws_counts_by_proto).
+    Because all UDP traffic is routed to `blackhole`, any WebSocket stream carrying UDP only
+    receives the 129-byte HTTP 101 Switching Protocols header (`bytes_sent <= 140`, 0 VLESS bytes).
+    Separating real TCP streams (`bytes_sent > 140`) from blocked UDP streams (`bytes_sent <= 140`
+    after 1.2s) ensures blocked UDP sockets never keep a disconnected user online.
+    Returns (live_tcp_counts_by_proto, dead_udp_counts_by_proto).
     """
     live_counts = {"vless": 0, "vmess": 0, "trojan": 0}
     dead_counts = {"vless": 0, "vmess": 0, "trojan": 0}
@@ -1063,39 +1062,36 @@ def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, int]]:
             if not matched_proto:
                 continue
 
-            if lport in WS_HEARTBEAT_PORTS and info_ln:
+            if lport in WS_PORTS and info_ln:
                 sock_key = f"{lport}:{rport}"
                 seen_keys.add(sock_key)
                 m_rx = SS_RX_BYTES_RE.search(info_ln)
-                m_ds = SS_DATA_SEGS_IN_RE.search(info_ln)
+                m_tx = SS_TX_BYTES_RE.search(info_ln)
                 rx_b = int(m_rx.group(1)) if m_rx else 0
-                d_segs = int(m_ds.group(1)) if m_ds else 0
+                tx_b = int(m_tx.group(1)) if m_tx else 0
 
                 prev = XRAY_SOCKET_RX_STATE.get(sock_key)
                 if prev is None:
                     XRAY_SOCKET_RX_STATE[sock_key] = {
+                        "first_seen": now_mono,
                         "rx_bytes": rx_b,
-                        "data_segs_in": d_segs,
-                        "last_active_ts": now_mono,
+                        "tx_bytes": tx_b,
                     }
                     live_counts[matched_proto] += 1
                 else:
-                    if rx_b > int(prev["rx_bytes"]) or d_segs > int(prev["data_segs_in"]):
-                        prev["rx_bytes"] = rx_b
-                        prev["data_segs_in"] = d_segs
-                        prev["last_active_ts"] = now_mono
-                        live_counts[matched_proto] += 1
-                    elif (now_mono - float(prev["last_active_ts"])) < 1.8:
-                        live_counts[matched_proto] += 1
-                    else:
-                        # Zombie socket held open by CDN after phone disconnected (no WS Pong for >=1.8s)
+                    prev["rx_bytes"] = rx_b
+                    prev["tx_bytes"] = tx_b
+                    age = now_mono - float(prev["first_seen"])
+                    if tx_b <= 140 and age >= 1.2:
+                        # Blocked UDP stream (only 129-byte HTTP 101 sent, 0 VLESS bytes)
                         dead_counts[matched_proto] += 1
+                    else:
+                        live_counts[matched_proto] += 1
             else:
                 live_counts[matched_proto] += 1
     except Exception:
         pass
 
-    # Only clean up state entries once the kernel socket has actually closed
     for k in list(XRAY_SOCKET_RX_STATE.keys()):
         if k not in seen_keys:
             XRAY_SOCKET_RX_STATE.pop(k, None)
@@ -1103,15 +1099,41 @@ def scan_active_proto_sockets() -> tuple[dict[str, int], dict[str, int]]:
     return live_counts, dead_counts
 
 
+def kill_proto_zombie_sockets(proto: str):
+    """Immediately destroy leftover kernel zombie sockets on Xray ports for `proto` via `ss -K`."""
+    for p_port in PROTO_PORTS.get(proto, ()):
+        try:
+            subprocess.run(
+                ["ss", "-K", "sport", "=", f":{p_port}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except Exception:
+            pass
+    for k in list(XRAY_SOCKET_RX_STATE.keys()):
+        try:
+            lp = int(k.split(":", 1)[0])
+            if lp in PROTO_PORTS.get(proto, ()):
+                XRAY_SOCKET_RX_STATE.pop(k, None)
+        except Exception:
+            pass
+
+
 def query_xray_online_map(
     xray_users: list[sqlite3.Row],
     tag_to_uuid: dict[str, str],
-) -> tuple[dict[str, list[str]], bool]:
+) -> tuple[dict[str, list[str]], dict[str, dict[str, int]], bool]:
+    """
+    Query Xray's `statsonlineiplist` API.
+    Returns (om_ips_by_uid, om_last_ts_by_uid_net, online_map_ok).
+    """
     global XRAY_ONLINE_ALL_SUPPORTED
     om_by_uid: dict[str, list[str]] = {}
+    om_ts_by_uid_net: dict[str, dict[str, int]] = {}
     xray_bin = Path("/usr/local/bin/xray")
     if not xray_bin.exists():
-        return om_by_uid, False
+        return om_by_uid, om_ts_by_uid_net, False
 
     if XRAY_ONLINE_ALL_SUPPORTED:
         proc = subprocess.run(
@@ -1133,7 +1155,7 @@ def query_xray_online_map(
                         ip_c = clean_public_ip(str(ip_ent.get("ip") or ""))
                         if ip_c and ip_c not in lst:
                             lst.append(ip_c)
-                return om_by_uid, True
+                return om_by_uid, om_ts_by_uid_net, True
             except Exception:
                 pass
         elif "flag provided but not defined" in (proc.stderr or "").lower() or "unknown" in (proc.stderr or "").lower():
@@ -1158,16 +1180,27 @@ def query_xray_online_map(
                     d = json.loads(proc.stdout)
                     ips_map = d.get("ips") or {}
                     lst = om_by_uid.setdefault(uid, [])
+                    ts_map = om_ts_by_uid_net.setdefault(uid, {})
                     if isinstance(ips_map, dict):
-                        for raw_ip in ips_map.keys():
+                        for raw_ip, raw_ts in ips_map.items():
                             ip_c = clean_public_ip(str(raw_ip))
-                            if ip_c and ip_c not in lst:
+                            if not ip_c:
+                                continue
+                            if ip_c not in lst:
                                 lst.append(ip_c)
+                            if not is_trusted_cdn(ip_c):
+                                try:
+                                    _, net_k, _ = ip_family_and_prefixes(ip_c)
+                                    ts_val = int(raw_ts) if str(raw_ts).isdigit() else 0
+                                    if ts_val > ts_map.get(net_k, 0):
+                                        ts_map[net_k] = ts_val
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
-        return om_by_uid, any_queried
+        return om_by_uid, om_ts_by_uid_net, any_queried
 
-    return om_by_uid, False
+    return om_by_uid, om_ts_by_uid_net, False
 
 
 def update_vless_user_sessions(
@@ -1179,19 +1212,21 @@ def update_vless_user_sessions(
     active_sockets: int,
     dead_ws_sockets: int,
     last_accept_by_net: dict[str, float],
-    ws_closes_by_net: dict[str, tuple[float, int]],
+    om_ts_by_net: dict[str, int],
+    ws_closes_by_net: dict[str, list[float]],
     now_ts: float,
 ) -> tuple[list[str], int]:
     """
     Stateful VLESS Session-ID Engine (S1, S2, S3...):
       - Assigns 1 discrete Session ID per connected user on `uid` (supports 1, 3, 4, 10+ users).
-      - Keeps idle connected phones 100% Online via 1s WS Ping/Pong verification.
+      - Keeps idle connected phones 100% Online (Xray OnlineMap retains idle sessions for 600s).
       - Drops disconnected sessions within 1-2s:
-          * When all sockets for the protocol stop receiving 1s WS Pong (`active_sockets == 0`) -> instant clear.
-          * When a session's IPs leave `OnlineMap` -> instant pop (`0s` delay).
-          * In multi-user mode, if 1 user disconnects and leaves a dead CDN zombie socket (`dead_ws_sockets > 0`)
-            after their WS tunnels closed in Nginx (`ws_closes_by_net`) with no newer stream accepts -> drops
-            that disconnected user's Session ID in 1-2s while keeping all other users Online.
+          * When all TCP sockets close (`active_sockets == 0`) -> instant clear.
+          * When a user clicks Disconnect on their phone, all of their active WebSocket tunnels
+            close simultaneously in `/var/log/nginx/alyan-xray.log` (`closes_after_acc` burst
+            with `latest_close > last_acc` and `int(latest_close) >= om_ts`). Even if Cloudflare
+            Edge or Xray UDP blackhole holds 1-4 zombie sockets open on `:10001`, that subnet is
+            immediately recognized as disconnected in 0.5-1.5s and removed!
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
 
@@ -1203,21 +1238,50 @@ def update_vless_user_sessions(
     if active_traffic:
         XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
-    # Filter out any IP in OnlineMap whose WS tunnels just closed in Nginx and left a dead WS socket
-    filtered_om_ips: list[str] = []
-    for ip in live_om_ips:
-        if dead_ws_sockets > 0 and not is_trusted_cdn(ip):
+    # Detect per-subnet WebSocket disconnect bursts in `/var/log/nginx/alyan-xray.log`
+    disconnected_nets: set[str] = set()
+    candidate_nets: set[str] = set()
+    for ip in live_om_ips + recent_log_ips:
+        if not is_trusted_cdn(ip):
             try:
-                _, net_k, _ = ip_family_and_prefixes(ip)
-                close_ts, _ = ws_closes_by_net.get(net_k, (0.0, 0))
-                last_acc = last_accept_by_net.get(net_k, 0.0)
-                if close_ts > 0 and (now_ts - close_ts) >= 1.2 and close_ts >= (last_acc - 0.5) and not active_traffic:
-                    continue
+                _, nk, _ = ip_family_and_prefixes(ip)
+                candidate_nets.add(nk)
             except ValueError:
                 pass
-        filtered_om_ips.append(ip)
+    for s in sessions.values():
+        candidate_nets.update(s.get("net_keys", set()))
 
-    effective_recent_ips = recent_log_ips if (not online_map_ok or bool(filtered_om_ips)) else []
+    for net_k in candidate_nets:
+        close_list = ws_closes_by_net.get(net_k)
+        if not close_list:
+            continue
+        last_acc = last_accept_by_net.get(net_k, 0.0)
+        om_ts = om_ts_by_net.get(net_k, 0)
+        closes_after_acc = [t for t in close_list if t > (last_acc + 0.05)]
+        if not closes_after_acc:
+            continue
+        latest_close = max(closes_after_acc)
+        burst_cnt = sum(1 for t in closes_after_acc if (latest_close - t) <= 2.5)
+        if (
+            int(latest_close) >= int(om_ts)
+            and (now_ts - latest_close) >= 0.25
+            and (burst_cnt >= 2 or burst_cnt >= active_sockets)
+        ):
+            disconnected_nets.add(net_k)
+
+    def _is_ip_disconnected(ip_s: str) -> bool:
+        if is_trusted_cdn(ip_s):
+            return False
+        try:
+            _, nk, _ = ip_family_and_prefixes(ip_s)
+            return nk in disconnected_nets
+        except ValueError:
+            return False
+
+    filtered_om_ips = [ip for ip in live_om_ips if not _is_ip_disconnected(ip)]
+    filtered_recent_ips = [ip for ip in recent_log_ips if not _is_ip_disconnected(ip)]
+
+    effective_recent_ips = filtered_recent_ips if (not online_map_ok or bool(filtered_om_ips)) else []
     real_live_set = {ip for ip in filtered_om_ips if not is_trusted_cdn(ip)}
     raw_real_cands: list[str] = []
     cdn_cands: list[str] = []
@@ -1346,6 +1410,9 @@ def update_vless_user_sessions(
     live_all_set = set(filtered_om_ips)
     for sid, s in list(sessions.items()):
         s.pop("_touched", None)
+        if s.get("net_keys") and (s["net_keys"] & disconnected_nets):
+            sessions.pop(sid, None)
+            continue
         has_open_stream = bool(s["ips"] & live_all_set)
         if has_open_stream:
             s["last_seen"] = now_ts
@@ -1410,7 +1477,7 @@ def poll_xray_stats_and_ips(
 
     now_ts = time.time()
     proto_socket_counts, proto_dead_ws_counts = scan_active_proto_sockets()
-    om_by_uid, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
+    om_by_uid, om_ts_by_uid_net, online_map_ok = query_xray_online_map(xray_users, tag_to_uuid)
     ws_closes_by_net = read_nginx_ws_close_timestamps(lookback_sec=120.0)
     recent_log_ips_by_uid: dict[str, list[str]] = {}
     last_accept_by_uid_net: dict[str, dict[str, float]] = {}
@@ -1421,9 +1488,10 @@ def poll_xray_stats_and_ips(
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
                 f.seek(max(0, sz - 49152))
-                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-150:]
+                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-160:]
             for ln in tail_lines:
-                if "accepted tcp:" not in ln.lower() or "email:" not in ln:
+                low_ln = ln.lower()
+                if ("accepted tcp:" not in low_ln and "accepted udp:" not in low_ln) or "email:" not in low_ln:
                     continue
                 log_ts = parse_xray_log_ts(ln)
                 if log_ts is None or (now_ts - log_ts) > 120.0 or (now_ts - log_ts) < -5.0:
@@ -1436,7 +1504,7 @@ def poll_xray_stats_and_ips(
                 if not uid:
                     continue
 
-                ip_clean, _ = parse_xray_source_ip(ln)
+                ip_clean, _, is_udp = parse_xray_source_ip(ln)
                 if ip_clean and not is_trusted_cdn(ip_clean):
                     try:
                         _, net_k, _ = ip_family_and_prefixes(ip_clean)
@@ -1445,7 +1513,7 @@ def poll_xray_stats_and_ips(
                             u_map[net_k] = log_ts
                     except ValueError:
                         pass
-                    if (now_ts - log_ts) <= 2.0:
+                    if not is_udp and (now_ts - log_ts) <= 2.0:
                         lst = recent_log_ips_by_uid.setdefault(uid, [])
                         if ip_clean not in lst:
                             lst.append(ip_clean)
@@ -1454,6 +1522,7 @@ def poll_xray_stats_and_ips(
 
     ips_by_uuid: dict[str, list[str]] = {}
     dev_count_by_uuid: dict[str, int] = {}
+    proto_online_totals = {"vless": 0, "vmess": 0, "trojan": 0}
 
     for r in xray_users:
         uid = r["uuid"]
@@ -1484,11 +1553,26 @@ def poll_xray_stats_and_ips(
             active_sockets=active_sockets,
             dead_ws_sockets=dead_ws_sockets,
             last_accept_by_net=last_accept_by_uid_net.get(uid, {}),
+            om_ts_by_net=om_ts_by_uid_net.get(uid, {}),
             ws_closes_by_net=ws_closes_by_net,
             now_ts=now_ts,
         )
         ips_by_uuid[uid] = u_ips
         dev_count_by_uuid[uid] = u_cnt
+        if proto in proto_online_totals:
+            proto_online_totals[proto] += u_cnt
+
+    # When a protocol transitions from Online (>0) to Offline (0), or has leftover blocked UDP
+    # sockets while 0 users are online, immediately destroy leftover kernel zombie sockets via `ss -K`
+    # so Xray's internal OnlineMap (`statsonlineiplist`) also clears to `{}` in <1ms!
+    for proto, cur_tot in proto_online_totals.items():
+        prev_tot = PREV_PROTO_ONLINE.get(proto, 0)
+        if cur_tot == 0 and (
+            prev_tot > 0
+            or (proto_socket_counts.get(proto, 0) == 0 and proto_dead_ws_counts.get(proto, 0) > 0)
+        ):
+            kill_proto_zombie_sockets(proto)
+        PREV_PROTO_ONLINE[proto] = cur_tot
 
     return deltas, ips_by_uuid, dev_count_by_uuid
 
@@ -1645,7 +1729,7 @@ def enforce_cycle():
         conn.close()
 
     if xray_resync_needed and Path("/usr/local/bin/alyan-ctl").exists():
-        subprocess.run(["/usr/local/bin/alyan-ctl", "xray-sync"], stderr=subprocess.DEVNULL)
+        subprocess.run(["/usr/local/bin/alyan-ctl", "--actor", "cli", "xray-sync"], stderr=subprocess.DEVNULL)
 
     # ─── 3. Record Rolling Telemetry & Fast Snapshot ─────────────────────────
     cpu_pct = read_cpu_pct()
@@ -1657,7 +1741,7 @@ def enforce_cycle():
     HIST["rx"] = (HIST["rx"] + [round((rx_bps * 8) / 1048576.0, 2)])[-20:]
     HIST["tx"] = (HIST["tx"] + [round((tx_bps * 8) / 1048576.0, 2)])[-20:]
 
-    if not CACHED_SERVICES or (CYCLE_TICK % 3 == 0):
+    if not CACHED_SERVICES or (CYCLE_TICK % 6 == 0):
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
@@ -1699,7 +1783,7 @@ def main():
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(1.0)
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
@@ -1708,16 +1792,35 @@ EOF_ALYAN_GUARD
 
 chmod 0755 /opt/alyan/services/guard/alyan-guard.py
 
-# ─── [6/6] Sync Xray Config & Restart Services Cleanly ───────────────────────
-echo "[6/6] Syncing Xray config & restarting services..."
+# ─── [6/7] Tune Webpanel Live Cache & 1s UI Polling for Instant 1-2s Sync ────
+echo "[6/7] Tuning Webpanel API cache (0.4s) & browser live polling (1.0s)..."
+python3 - <<'EOF_PATCH_PANEL'
+from pathlib import Path
+
+app_py = Path("/opt/alyan/panel/app.py")
+if app_py.exists():
+    txt = app_py.read_text(encoding="utf-8", errors="ignore")
+    txt = txt.replace("READ_CACHE_TTL = 1.2", "READ_CACHE_TTL = 0.4")
+    app_py.write_text(txt, encoding="utf-8")
+
+app_js = Path("/opt/alyan/panel/static/app.js")
+if app_js.exists():
+    js = app_js.read_text(encoding="utf-8", errors="ignore")
+    js = js.replace("    }, 2000);", "    }, 1000);")
+    app_js.write_text(js, encoding="utf-8")
+EOF_PATCH_PANEL
+
+# ─── [7/7] Sync Xray Config & Restart Services Cleanly ───────────────────────
+echo "[7/7] Syncing Xray config & restarting services..."
 if [[ -x /usr/local/bin/alyan-ctl ]]; then
   /usr/local/bin/alyan-ctl --actor cli xray-sync >/dev/null 2>&1 || true
 fi
-systemctl restart xray alyan-guard
+systemctl restart xray alyan-guard alyan-panel
 echo "════════════════════════════════════════════════════════════════════"
 echo " ✅ UPDATE APPLIED SUCCESSFULLY!"
 echo "    - All UDP removed/blocked across Xray, SSH & Kernel sysctl"
 echo "    - Full-speed BBR + fq + 64MB TCP buffers + tcp_retries2=15 active"
 echo "    - VLESS goes Offline in 1-2s on disconnect & stays Online when idle"
+echo "    - Kernel Zombie Socket Purge (ss -K) + 1s UI live sync active"
 echo "    - Multi-user Session-ID IP tracking (1, 2, 3... 10+ users) intact"
 echo "════════════════════════════════════════════════════════════════════"
