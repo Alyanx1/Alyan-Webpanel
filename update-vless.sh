@@ -72,9 +72,9 @@ net.ipv4.tcp_retries2 = 15
 net.ipv4.tcp_max_syn_backlog = 65536
 net.ipv4.tcp_max_tw_buckets = 2000000
 net.ipv4.ip_local_port_range = 10240 65535
-net.ipv4.tcp_keepalive_time = 60
-net.ipv4.tcp_keepalive_intvl = 10
-net.ipv4.tcp_keepalive_probes = 6
+net.ipv4.tcp_keepalive_time = 10
+net.ipv4.tcp_keepalive_intvl = 2
+net.ipv4.tcp_keepalive_probes = 3
 EOF_SYSCTL
 
 sysctl --system >/dev/null 2>&1 || true
@@ -389,12 +389,14 @@ defaults
     option  dontlognull
     option  clitcpka
     option  srvtcpka
+    option  abortonclose
     timeout connect 5s
     timeout client  4h
     timeout server  4h
     timeout tunnel  12h
-    timeout client-fin 15s
-    timeout server-fin 15s
+    timeout client-fin 1s
+    timeout server-fin 1s
+    timeout http-keep-alive 4s
 
 # ─── PUBLIC PORT 80: HTTP / SSH-WS (/alyan) / Direct Xray WS / ACME ──────────
 frontend fe_http_80
@@ -461,8 +463,9 @@ frontend fe_xray_mux
     mode http
     option dontlognull
     timeout http-request 10s
+    timeout http-keep-alive 4s
     timeout client 1h
-    timeout client-fin 5s
+    timeout client-fin 1s
 
     # Unified Real Client IP Priority (BunnyCDN -> CloudFront -> CF -> True-Client-IP -> XFF -> X-Real-IP -> Direct src)
     http-request set-var(req.real_ip) req.hdr_ip(X-Forwarded-For,1) if { req.hdr(X-Forwarded-For) -m found }
@@ -508,51 +511,58 @@ backend be_xray_h2c
 
 backend be_xray_vless_ws
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_vless_ws 127.0.0.1:10001
 
 backend be_xray_vmess_ws
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_vmess_ws 127.0.0.1:10002
 
 backend be_xray_trojan_ws
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_trojan_ws 127.0.0.1:10003
 
 backend be_xray_vless_xhttp
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_vless_xhttp 127.0.0.1:10031
 
 backend be_xray_vless_grpc
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_vless_grpc 127.0.0.1:10011 proto h2
 
 backend be_xray_vmess_grpc
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_vmess_grpc 127.0.0.1:10012 proto h2
 
 backend be_xray_trojan_grpc
     mode http
+    option abortonclose
     timeout server 1h
-    timeout tunnel 1h
-    timeout server-fin 5s
+    timeout tunnel 15m
+    timeout server-fin 1s
     server xray_trojan_grpc 127.0.0.1:10013 proto h2
 
 backend be_nginx_landing
@@ -1522,7 +1532,7 @@ def scan_active_proto_sockets(
                 elif tx_b < 600 and idle_sec >= 1.2:
                     # Finished one-shot DNS (:53) query (<600B) sitting idle -> do not count as active tunnel
                     pass
-                elif tx_b >= 600 or (tx_b > 140 and idle_sec < 1.2):
+                elif (tx_b >= 600 and idle_sec < 20.0) or (tx_b > 140 and idle_sec < 1.2):
                     live_counts[matched_proto] += 1
                     if idle_sec < min_idle_by_proto[matched_proto]:
                         min_idle_by_proto[matched_proto] = idle_sec
@@ -1644,10 +1654,24 @@ def query_xray_online_map(
                     if not uid:
                         continue
                     lst = om_by_uid.setdefault(uid, [])
+                    ts_map = om_ts_by_uid_net.setdefault(uid, {})
+                    ip_ts_map = om_ip_ts_by_uid.setdefault(uid, {})
                     for ip_ent in u_obj.get("ips", []) or []:
                         ip_c = clean_public_ip(str(ip_ent.get("ip") or ""))
-                        if ip_c and ip_c not in lst:
+                        if not ip_c:
+                            continue
+                        if ip_c not in lst:
                             lst.append(ip_c)
+                        last_s = int(ip_ent.get("lastSeen") or ip_ent.get("last_seen") or 0)
+                        if last_s > 0:
+                            ip_ts_map[ip_c] = last_s
+                            if not is_trusted_cdn(ip_c):
+                                try:
+                                    _, net_k, _ = ip_family_and_prefixes(ip_c)
+                                    if last_s > ts_map.get(net_k, 0):
+                                        ts_map[net_k] = last_s
+                                except Exception:
+                                    pass
                 return om_by_uid, om_ts_by_uid_net, om_ip_ts_by_uid, True
             except Exception:
                 pass
@@ -1905,6 +1929,20 @@ def update_vless_user_sessions(
 
     if not sessions:
         XRAY_SESSION_SEQ[uid] = 0
+        # Clean up any leftover dead zombie sockets for this disconnected user
+        for sock_k, st_info in list(XRAY_SOCKET_RX_STATE.items()):
+            if st_info.get("uid") == uid:
+                XRAY_SOCKET_RX_STATE.pop(sock_k, None)
+                try:
+                    lp, rp = sock_k.split(":")
+                    subprocess.run(
+                        ["ss", "-K", "sport", "=", f":{lp}", "dport", "=", f":{rp}"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=0.8,
+                    )
+                except Exception:
+                    pass
         return [], 0
 
     pinned_ips: list[str] = []
