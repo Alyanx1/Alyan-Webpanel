@@ -2088,6 +2088,19 @@ def poll_xray_stats_and_ips(
 
         u_sock_cnt = uid_counts.get(uid, 0)
         u_cls_rec = uid_closed.get(uid, 0)
+        u_min_idle = uid_min_idle.get(uid, 9999.0)
+
+        # Instant Disconnect Detection: If sockets just closed (disconnect) and all remaining sockets
+        # have been idle for >= 2.0s with zero traffic delta, remaining sockets are dead keepalive zombies!
+        if u_cls_rec >= 1 and u_min_idle >= 2.0 and not active_traffic:
+            u_sock_cnt = 0
+            for k_ip in list(uid_ip_counts.keys()):
+                if k_ip[0] == uid:
+                    uid_ip_counts[k_ip] = 0
+            for k_net in list(uid_net_counts.keys()):
+                if k_net[0] == uid:
+                    uid_net_counts[k_net] = 0
+
         if u_sock_cnt == 0 and u_cls_rec == 0 and live_om and untagged_by_proto.get(proto, 0) > 0:
             u_sock_cnt = untagged_by_proto[proto]
 
