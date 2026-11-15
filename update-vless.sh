@@ -1086,13 +1086,14 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                 "be_xray_mux",
                 "be_ws_http",
                 "be_nginx_ws",
+                "be_tls_loop",
             ):
                 if client_ip not in ws_ips:
                     ws_ips.append(client_ip)
                 if not is_trusted_cdn(client_ip):
                     for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", ln):
                         lp = m_lp.group(1)
-                        if lp not in ("8880", "8881", "8882", "8883", "10001", "10002", "10003", "10031"):
+                        if lp not in ("8880", "8881", "8882", "8883", "10001", "10002", "10003", "10031", "4443"):
                             xray_port_to_ip[lp] = client_ip
             elif be_name in (
                 "be_xray_vless_grpc",
@@ -1770,19 +1771,27 @@ def update_vless_user_sessions(
         if sock_cnt == 0 and len(sessions) <= 1 and user_active_sockets > 0:
             sock_cnt = user_active_sockets
 
+        has_alive_socket = (sock_cnt > 0)
+        time_since_seen = (now_ts - float(ip_ts_val)) if ip_ts_val > 0 else 999.0
         hap_connected = (ip in proto_hap_ips)
         last_acc_val = LAST_ACCEPT_BY_UID_NET.get(uid, {}).get(net_k, 0.0)
         is_fresh = (
             active_traffic
             or (ip in recent_set_fast)
-            or (ip_ts_val > 0 and (now_ts - float(ip_ts_val)) <= 2.5)
-            or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.5)
+            or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.0)
         )
         # IP is truly active if:
-        # 1. HAProxy holds established TCP connection & seen within 15s (prevents idle blink!)
-        # 2. OR fresh traffic/handshake within 2.5s
-        # 3. OR open kernel sockets and HAProxy holds connection
-        if (hap_connected and (now_ts - float(ip_ts_val)) <= 15.0) or is_fresh or (sock_cnt > 0 and hap_connected):
+        # 1. Open kernel socket for this user/IP & seen within 20s (standard WS keepalive ping ~10s, 0% idle blink!)
+        # 2. Direct HAProxy connection verified & seen within 15s
+        # 3. Fresh traffic or new accept event within 2.0s
+        # 4. Grace period of <= 2.0s after disconnect before dropping
+        if (has_alive_socket and time_since_seen <= 20.0):
+            active_om_ips.append(ip)
+        elif (hap_connected and time_since_seen <= 15.0):
+            active_om_ips.append(ip)
+        elif is_fresh:
+            active_om_ips.append(ip)
+        elif time_since_seen <= 2.0:
             active_om_ips.append(ip)
 
     filtered_om_ips = active_om_ips
@@ -1925,13 +1934,13 @@ def update_vless_user_sessions(
             sess_sockets = user_active_sockets
 
         hap_has_ip = any(ip in proto_hap_ips for ip in s["ips"])
-        if (sess_sockets > 0 and hap_has_ip) or has_open_stream:
+        if sess_sockets > 0 or has_open_stream or (hap_has_ip and (now_ts - s["last_seen"]) <= 15.0):
             s["last_seen"] = now_ts
         elif (now_ts - s["created_at"]) > 2.0 and not active_traffic:
             sessions.pop(sid, None)
             continue
 
-        if (now_ts - s["last_seen"]) > 1.5:
+        if (now_ts - s["last_seen"]) > 2.0:
             sessions.pop(sid, None)
 
     if not sessions:
