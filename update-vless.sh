@@ -1727,6 +1727,7 @@ def update_vless_user_sessions(
     live_om_ips: list[str],
     om_ip_ts: dict[str, int],
     recent_log_ips: list[str],
+    proto_hap_ips: list[str],
     online_map_ok: bool,
     active_traffic: bool,
     user_active_sockets: int,
@@ -1749,11 +1750,12 @@ def update_vless_user_sessions(
     filtered_recent_ips = list(recent_log_ips)
     recent_set_fast = set(filtered_recent_ips)
 
-    # Keep only IPs in live_om_ips that either have >=1 open kernel socket OR fresh activity (<=2.5s)
+    # Keep only IPs in live_om_ips that either have active HAProxy connection, kernel socket, or fresh activity (<=2.5s)
     active_om_ips: list[str] = []
     for ip in live_om_ips:
+        ip_ts_val = om_ip_ts.get(ip, 0)
         if is_trusted_cdn(ip):
-            if user_active_sockets > 0 or active_traffic:
+            if active_traffic or (ip_ts_val > 0 and (now_ts - float(ip_ts_val)) <= 2.5):
                 active_om_ips.append(ip)
             continue
         try:
@@ -1768,7 +1770,7 @@ def update_vless_user_sessions(
         if sock_cnt == 0 and len(sessions) <= 1 and user_active_sockets > 0:
             sock_cnt = user_active_sockets
 
-        ip_ts_val = om_ip_ts.get(ip, 0)
+        hap_connected = (ip in proto_hap_ips)
         last_acc_val = LAST_ACCEPT_BY_UID_NET.get(uid, {}).get(net_k, 0.0)
         is_fresh = (
             active_traffic
@@ -1776,7 +1778,11 @@ def update_vless_user_sessions(
             or (ip_ts_val > 0 and (now_ts - float(ip_ts_val)) <= 2.5)
             or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.5)
         )
-        if sock_cnt > 0 or is_fresh:
+        # IP is truly active if:
+        # 1. HAProxy holds established TCP connection & seen within 15s (prevents idle blink!)
+        # 2. OR fresh traffic/handshake within 2.5s
+        # 3. OR open kernel sockets and HAProxy holds connection
+        if (hap_connected and (now_ts - float(ip_ts_val)) <= 15.0) or is_fresh or (sock_cnt > 0 and hap_connected):
             active_om_ips.append(ip)
 
     filtered_om_ips = active_om_ips
@@ -1918,7 +1924,8 @@ def update_vless_user_sessions(
         if len(sessions) == 1 and sess_sockets == 0 and user_active_sockets > 0:
             sess_sockets = user_active_sockets
 
-        if sess_sockets > 0 or has_open_stream:
+        hap_has_ip = any(ip in proto_hap_ips for ip in s["ips"])
+        if (sess_sockets > 0 and hap_has_ip) or has_open_stream:
             s["last_seen"] = now_ts
         elif (now_ts - s["created_at"]) > 2.0 and not active_traffic:
             sessions.pop(sid, None)
@@ -1929,20 +1936,6 @@ def update_vless_user_sessions(
 
     if not sessions:
         XRAY_SESSION_SEQ[uid] = 0
-        # Clean up any leftover dead zombie sockets for this disconnected user
-        for sock_k, st_info in list(XRAY_SOCKET_RX_STATE.items()):
-            if st_info.get("uid") == uid:
-                XRAY_SOCKET_RX_STATE.pop(sock_k, None)
-                try:
-                    lp, rp = sock_k.split(":")
-                    subprocess.run(
-                        ["ss", "-K", "sport", "=", f":{lp}", "dport", "=", f":{rp}"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=0.8,
-                    )
-                except Exception:
-                    pass
         return [], 0
 
     pinned_ips: list[str] = []
@@ -2101,7 +2094,31 @@ def poll_xray_stats_and_ips(
                 if k_net[0] == uid:
                     uid_net_counts[k_net] = 0
 
-        if u_sock_cnt == 0 and u_cls_rec == 0 and live_om and untagged_by_proto.get(proto, 0) > 0:
+        # Determine active client IPs for this protocol from HAProxy
+        if proto in ("vless", "vmess"):
+            proto_hap_ips = ws_ips
+        elif proto == "grpc":
+            proto_hap_ips = h2c_ips
+        elif proto == "trojan":
+            proto_hap_ips = trojan_ips
+        else:
+            proto_hap_ips = ws_ips + h2c_ips + trojan_ips
+
+        # Active users count on this protocol from online map
+        proto_active_uids = [
+            u_r["uuid"] for u_r in xray_users
+            if u_r["status"] == "active" and u_r["proto"].lower() == proto and om_by_uid.get(u_r["uuid"])
+        ]
+
+        # Untagged sockets are ONLY used as fallback if ONLY ONE user is active on this protocol
+        # (strictly prevents cross-user socket leakage in multi-user environments!)
+        if (
+            u_sock_cnt == 0
+            and u_cls_rec == 0
+            and live_om
+            and len(proto_active_uids) <= 1
+            and untagged_by_proto.get(proto, 0) > 0
+        ):
             u_sock_cnt = untagged_by_proto[proto]
 
         if not live_om and not recent_lg and proto == "trojan" and active_traffic and trojan_ips:
@@ -2113,6 +2130,7 @@ def poll_xray_stats_and_ips(
             live_om_ips=live_om,
             om_ip_ts=u_om_ts,
             recent_log_ips=recent_lg,
+            proto_hap_ips=proto_hap_ips,
             online_map_ok=online_map_ok,
             active_traffic=active_traffic,
             user_active_sockets=u_sock_cnt,
