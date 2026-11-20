@@ -477,9 +477,6 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                 "be_xray_trojan_ws",
                 "be_xray_vless_xhttp",
                 "be_xray_mux",
-                "be_ws_http",
-                "be_nginx_ws",
-                "be_tls_loop",
             ):
                 if client_ip not in ws_ips:
                     ws_ips.append(client_ip)
@@ -491,8 +488,6 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                 "be_xray_vmess_grpc",
                 "be_xray_trojan_grpc",
                 "be_xray_h2c",
-                "be_grpc_h2c",
-                "be_nginx_h2c",
             ):
                 if client_ip not in h2c_ips:
                     h2c_ips.append(client_ip)
@@ -1161,13 +1156,13 @@ def update_vless_user_sessions(
             or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.0)
         )
         # IP is truly active if:
-        # 1. Open kernel socket for this user/IP & seen within 300s (0% blink during long idle!)
-        # 2. Direct HAProxy connection verified & seen within 300s
+        # 1. Open kernel socket for this user/IP on proxy ports (0% blink during long idle!)
+        # 2. Direct HAProxy proxy backend connection verified (be_xray_*_ws)
         # 3. Fresh traffic or new accept event within 2.0s
-        # 4. Grace period of <= 2.0s after disconnect before dropping
+        # 4. Seen in Xray online list within 1.0s
         if has_alive_socket:
             active_om_ips.append(ip)
-        elif hap_connected and (time_since_seen <= 300.0 or time_since_seen == 999.0):
+        elif hap_connected:
             active_om_ips.append(ip)
         elif is_fresh:
             active_om_ips.append(ip)
