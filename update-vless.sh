@@ -1052,7 +1052,7 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(1.5)
         s.connect(str(HAPROXY_SOCK))
-        s.sendall(b"show sess\n")
+        s.sendall(b"show sess all\n")
         chunks = []
         while True:
             data = s.recv(65536)
@@ -1062,22 +1062,43 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
         s.close()
         raw = b"".join(chunks).decode("utf-8", errors="ignore")
 
-        for ln in raw.splitlines():
-            m_src = re.search(r"\bsrc=([^\s]+)", ln)
-            m_be = re.search(r"\bbe=([^\s]+)", ln)
+        blocks = re.split(r"(?=^0x[0-9a-fA-F]+:)", raw, flags=re.MULTILINE)
+        parsed_blocks: list[tuple[str, str, str, list[str]]] = []
+        tls_loop_map: dict[str, str] = {}
+
+        for blk in blocks:
+            if not blk.strip():
+                continue
+            m_src = re.search(r"\b(?:source|src)=([^\s]+)", blk)
+            m_be = re.search(r"\b(?:backend|be)=([^\s\(]+)", blk)
             if not m_src or not m_be:
                 continue
+            src_tok = m_src.group(1).strip()
+            be_name = m_be.group(1).strip()
+            lports = [
+                m.group(1)
+                for m in re.finditer(r"127\.0\.0\.1:(\d+)", blk)
+                if m.group(1) not in ("109", "143", "22", "2095", "4443", "8880", "8881", "8882", "8883", "8443", "10001", "10002", "10003", "10011", "10012", "10013", "10023", "10031")
+            ]
+            src_port = src_tok.rsplit(":", 1)[-1] if ":" in src_tok else ""
+            c_ip = clean_public_ip(src_tok)
+            if be_name == "be_tls_loop" and c_ip:
+                for lp in lports:
+                    tls_loop_map[lp] = c_ip
+            parsed_blocks.append((src_tok, src_port, be_name, lports))
 
-            client_ip = clean_public_ip(m_src.group(1))
+        for src_tok, src_port, be_name, lports in parsed_blocks:
+            client_ip = clean_public_ip(src_tok)
+            if not client_ip and src_tok.startswith("127.0.0.1:") and src_port in tls_loop_map:
+                client_ip = tls_loop_map[src_port]
             if not client_ip:
                 continue
 
-            be_name = m_be.group(1)
             if be_name in ("be_ssh_dropbear", "be_ssh_openssh", "be_dropbear"):
-                for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", ln):
-                    lp = m_lp.group(1)
-                    if lp not in ("109", "143", "22", "8880", "8881", "8882", "8883", "8443", "10023"):
-                        loop_port_to_ip[lp] = client_ip
+                for lp in lports:
+                    loop_port_to_ip[lp] = client_ip
+                if not lports:
+                    loop_port_to_ip[f" fallback_{client_ip}"] = client_ip
             elif be_name in (
                 "be_xray_vless_ws",
                 "be_xray_vmess_ws",
@@ -1091,10 +1112,8 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                 if client_ip not in ws_ips:
                     ws_ips.append(client_ip)
                 if not is_trusted_cdn(client_ip):
-                    for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", ln):
-                        lp = m_lp.group(1)
-                        if lp not in ("8880", "8881", "8882", "8883", "10001", "10002", "10003", "10031", "4443"):
-                            xray_port_to_ip[lp] = client_ip
+                    for lp in lports:
+                        xray_port_to_ip[lp] = client_ip
             elif be_name in (
                 "be_xray_vless_grpc",
                 "be_xray_vmess_grpc",
@@ -1106,18 +1125,14 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                 if client_ip not in h2c_ips:
                     h2c_ips.append(client_ip)
                 if not is_trusted_cdn(client_ip):
-                    for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", ln):
-                        lp = m_lp.group(1)
-                        if lp not in ("8880", "8881", "8882", "8883", "10011", "10012", "10013"):
-                            xray_port_to_ip[lp] = client_ip
+                    for lp in lports:
+                        xray_port_to_ip[lp] = client_ip
             elif be_name in ("be_xray_trojan_tcp", "be_trojan_tcp"):
                 if client_ip not in trojan_ips:
                     trojan_ips.append(client_ip)
                 if not is_trusted_cdn(client_ip):
-                    for m_lp in re.finditer(r"127\.0\.0\.1:(\d+)", ln):
-                        lp = m_lp.group(1)
-                        if lp not in ("4443", "10023"):
-                            xray_port_to_ip[lp] = client_ip
+                    for lp in lports:
+                        xray_port_to_ip[lp] = client_ip
     except Exception:
         pass
 
@@ -1200,13 +1215,17 @@ def read_pid_io_bytes(pid: int) -> int:
 
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
+    auth_refreshed = False
     if CYCLE_TICK == 1 or (CYCLE_TICK % 2 == 0):
         refresh_ssh_auth_cache()
+        auth_refreshed = True
 
     wsd_map: dict[str, dict] = {}
     if WSD_STATE.exists():
         try:
-            wsd_map = json.loads(WSD_STATE.read_text(encoding="utf-8")).get("sessions", {})
+            raw_wsd = json.loads(WSD_STATE.read_text(encoding="utf-8"))
+            if isinstance(raw_wsd, dict):
+                wsd_map = raw_wsd.get("sessions", raw_wsd) if isinstance(raw_wsd.get("sessions"), dict) else raw_wsd
         except Exception:
             wsd_map = {}
 
@@ -1254,6 +1273,15 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
                 target_pid = pid
                 break
 
+        if not username and not auth_refreshed:
+            refresh_ssh_auth_cache()
+            auth_refreshed = True
+            for pid in pids:
+                if pid in PID_AUTH_CACHE and PID_AUTH_CACHE[pid] in managed_users:
+                    username = PID_AUTH_CACHE[pid]
+                    target_pid = pid
+                    break
+
         if not username:
             continue
 
@@ -1276,16 +1304,17 @@ def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
                 deltas[username] += (cur_io - prev_io)
             PID_LAST_IO_BYTES[target_pid] = cur_io
         else:
+            if peer_ip == "127.0.0.1" and hap_loop_ips:
+                real_ip = next(iter(hap_loop_ips.values()))
             cur_io = read_pid_io_bytes(target_pid)
             prev_io = PID_LAST_IO_BYTES.get(target_pid, 0)
             if cur_io > prev_io:
                 deltas[username] += (cur_io - prev_io)
             PID_LAST_IO_BYTES[target_pid] = cur_io
 
-        if real_ip and real_ip != "127.0.0.1":
-            sessions_by_user[username].append(
-                {"pid": target_pid, "ip": real_ip, "dev": str(real_ip)}
-            )
+        sessions_by_user[username].append(
+            {"pid": target_pid, "ip": real_ip or "127.0.0.1", "dev": str(real_ip or target_pid)}
+        )
 
     for port, info in wsd_map.items():
         uname = PORT_TO_USER.get(port)
@@ -1530,10 +1559,10 @@ def scan_active_proto_sockets(
                     except Exception:
                         pass
                     XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-                elif tx_b < 600 and idle_sec >= 1.2:
-                    # Finished one-shot DNS (:53) query (<600B) sitting idle -> do not count as active tunnel
+                elif tx_b < 300 and idle_sec >= 1.2:
+                    # Finished tiny one-shot query (<300B) sitting idle -> do not count as active tunnel
                     pass
-                elif (tx_b >= 600 and idle_sec < 20.0) or (tx_b > 140 and idle_sec < 1.2):
+                elif (tx_b >= 300 and idle_sec < 300.0) or (tx_b > 140 and idle_sec < 1.2):
                     live_counts[matched_proto] += 1
                     if idle_sec < min_idle_by_proto[matched_proto]:
                         min_idle_by_proto[matched_proto] = idle_sec
@@ -1600,27 +1629,9 @@ def scan_active_proto_sockets(
 
 
 def kill_proto_zombie_sockets(proto: str):
-    """When 0 users are online on `proto`, clean up any leftover dead CDN sockets via `ss -K`."""
-    UDP_KILL_TS_LIST.append(time.time())
+    """When 0 users are online on `proto`, reset close-burst state without killing active TCP tunnels."""
     if proto in REAL_TCP_CLOSE_MONO:
         REAL_TCP_CLOSE_MONO[proto].clear()
-    for p_port in PROTO_PORTS.get(proto, ()):
-        try:
-            subprocess.run(
-                ["ss", "-K", "sport", "=", f":{p_port}"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=1.0,
-            )
-        except Exception:
-            pass
-    for k in list(XRAY_SOCKET_RX_STATE.keys()):
-        try:
-            lp = int(k.split(":", 1)[0])
-            if lp in PROTO_PORTS.get(proto, ()):
-                XRAY_SOCKET_RX_STATE.pop(k, None)
-        except Exception:
-            pass
 
 
 def query_xray_online_map(
@@ -1776,18 +1787,18 @@ def update_vless_user_sessions(
         hap_connected = (ip in proto_hap_ips)
         last_acc_val = LAST_ACCEPT_BY_UID_NET.get(uid, {}).get(net_k, 0.0)
         is_fresh = (
-            active_traffic
+            (active_traffic and time_since_seen <= 2.5)
             or (ip in recent_set_fast)
             or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.0)
         )
         # IP is truly active if:
-        # 1. Open kernel socket for this user/IP & seen within 20s (standard WS keepalive ping ~10s, 0% idle blink!)
-        # 2. Direct HAProxy connection verified & seen within 15s
+        # 1. Open kernel socket for this user/IP & seen within 300s (0% blink during long idle!)
+        # 2. Direct HAProxy connection verified & seen within 300s
         # 3. Fresh traffic or new accept event within 2.0s
         # 4. Grace period of <= 2.0s after disconnect before dropping
-        if (has_alive_socket and time_since_seen <= 20.0):
+        if (has_alive_socket and time_since_seen <= 300.0):
             active_om_ips.append(ip)
-        elif (hap_connected and time_since_seen <= 15.0):
+        elif (hap_connected and time_since_seen <= 300.0):
             active_om_ips.append(ip)
         elif is_fresh:
             active_om_ips.append(ip)
@@ -2011,8 +2022,18 @@ def poll_xray_stats_and_ips(
             with XRAY_ACCESS_LOG.open("rb") as f:
                 f.seek(0, os.SEEK_END)
                 sz = f.tell()
-                f.seek(max(0, sz - 65536))
-                tail_lines = f.read().decode("utf-8", errors="ignore").splitlines()[-300:]
+                f.seek(max(0, sz - 131072))
+                raw_lines = f.read().decode("utf-8", errors="ignore").splitlines()
+            tail_lines = [l for l in raw_lines if "api-in -> api" not in l][-300:]
+            if sz > 2097152 and (CYCLE_TICK == 1 or CYCLE_TICK % 60 == 0):
+                try:
+                    keep_bytes = "\n".join(tail_lines[-500:]).encode("utf-8") + b"\n"
+                    with XRAY_ACCESS_LOG.open("r+b") as wf:
+                        wf.seek(0)
+                        wf.write(keep_bytes)
+                        wf.truncate()
+                except Exception:
+                    pass
             for ln in tail_lines:
                 low_ln = ln.lower()
                 if "accepted tcp:" not in low_ln or "email:" not in low_ln:
@@ -2351,8 +2372,10 @@ def enforce_cycle():
             user_sess_cnt = len(ips)
         xray_live[uid] = {"online": user_sess_cnt, "ips": ips}
 
+    now_int = int(time.time())
     snapshot = {
-        "updated_at": int(time.time()),
+        "updated_at": now_int,
+        "ts": now_int,
         "cpu_pct": cpu_pct,
         "ram_pct": ram_pct,
         "rx_bps": rx_bps,
