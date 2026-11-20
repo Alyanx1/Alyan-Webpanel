@@ -33,7 +33,7 @@ FAIL_WINDOW = 300.0
 
 # Lightweight read coalescing cache (1.2s TTL, cleared immediately on any mutation)
 READ_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-READ_CACHE_TTL = 1.2
+READ_CACHE_TTL = 0.5
 
 
 def load_or_create_secret() -> bytes:

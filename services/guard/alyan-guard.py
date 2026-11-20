@@ -931,10 +931,7 @@ def scan_active_proto_sockets(
                     except Exception:
                         pass
                     XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-                elif tx_b < 300 and idle_sec >= 1.2:
-                    # Finished tiny one-shot query (<300B) sitting idle -> do not count as active tunnel
-                    pass
-                elif (tx_b >= 300 and idle_sec < 300.0) or (tx_b > 140 and idle_sec < 1.2):
+                else:
                     live_counts[matched_proto] += 1
                     if idle_sec < min_idle_by_proto[matched_proto]:
                         min_idle_by_proto[matched_proto] = idle_sec
@@ -1168,13 +1165,13 @@ def update_vless_user_sessions(
         # 2. Direct HAProxy connection verified & seen within 300s
         # 3. Fresh traffic or new accept event within 2.0s
         # 4. Grace period of <= 2.0s after disconnect before dropping
-        if (has_alive_socket and time_since_seen <= 300.0):
+        if has_alive_socket:
             active_om_ips.append(ip)
-        elif (hap_connected and time_since_seen <= 300.0):
+        elif hap_connected and (time_since_seen <= 300.0 or time_since_seen == 999.0):
             active_om_ips.append(ip)
         elif is_fresh:
             active_om_ips.append(ip)
-        elif time_since_seen <= 2.0:
+        elif time_since_seen <= 1.0:
             active_om_ips.append(ip)
 
     filtered_om_ips = active_om_ips
@@ -1316,14 +1313,9 @@ def update_vless_user_sessions(
         if len(sessions) == 1 and sess_sockets == 0 and user_active_sockets > 0:
             sess_sockets = user_active_sockets
 
-        hap_has_ip = any(ip in proto_hap_ips for ip in s["ips"])
-        if sess_sockets > 0 or has_open_stream or (hap_has_ip and (now_ts - s["last_seen"]) <= 15.0):
+        if sess_sockets > 0 or has_open_stream or active_traffic:
             s["last_seen"] = now_ts
-        elif (now_ts - s["created_at"]) > 2.0 and not active_traffic:
-            sessions.pop(sid, None)
-            continue
-
-        if (now_ts - s["last_seen"]) > 2.0:
+        else:
             sessions.pop(sid, None)
 
     if not sessions:
@@ -1485,16 +1477,6 @@ def poll_xray_stats_and_ips(
         u_cls_rec = uid_closed.get(uid, 0)
         u_min_idle = uid_min_idle.get(uid, 9999.0)
 
-        # Instant Disconnect Detection: If sockets just closed (disconnect) and all remaining sockets
-        # have been idle for >= 2.0s with zero traffic delta, remaining sockets are dead keepalive zombies!
-        if u_cls_rec >= 1 and u_min_idle >= 2.0 and not active_traffic:
-            u_sock_cnt = 0
-            for k_ip in list(uid_ip_counts.keys()):
-                if k_ip[0] == uid:
-                    uid_ip_counts[k_ip] = 0
-            for k_net in list(uid_net_counts.keys()):
-                if k_net[0] == uid:
-                    uid_net_counts[k_net] = 0
 
         # Determine active client IPs for this protocol from HAProxy
         if proto in ("vless", "vmess"):

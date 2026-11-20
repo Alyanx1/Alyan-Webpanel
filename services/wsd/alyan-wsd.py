@@ -117,12 +117,19 @@ def tune_socket(writer: asyncio.StreamWriter):
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
+            if hasattr(socket, "TCP_QUICKACK"):
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+                except Exception:
+                    pass
         except Exception:
             pass
     tr = writer.transport
     if tr is not None:
         try:
-            tr.set_write_buffer_limits(high=262144, low=65536)
+            tr.set_write_buffer_limits(high=65536, low=16384)
         except Exception:
             pass
 
@@ -203,12 +210,13 @@ def strip_ws_headers(data: bytes) -> tuple[bool, bytes]:
 async def pipe_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stat_dict: dict, key: str):
     try:
         while True:
-            chunk = await reader.read(65536)
+            chunk = await reader.read(16384)
             if not chunk:
                 break
             stat_dict[key] += len(chunk)
             writer.write(chunk)
             await writer.drain()
+            await asyncio.sleep(0)
     except (ConnectionError, asyncio.CancelledError, OSError):
         pass
     finally:

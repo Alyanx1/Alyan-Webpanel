@@ -49,20 +49,22 @@ if [[ -f /etc/sysctl.conf ]]; then
 fi
 
 cat <<'EOF_SYSCTL' > /etc/sysctl.d/99-alyan-turbo.conf
-# Alyan Webpanel — Native Wire-Speed + Stable Ping TCP-Only Kernel Profile
+# Alyan Webpanel — Native Wire-Speed + Stable Ping Mobile-Adaptive Kernel Profile
 fs.file-max = 2097152
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 65536
 net.core.optmem_max = 25165824
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
-net.ipv4.tcp_notsent_lowat = 4294967295
+net.core.rmem_default = 131072
+net.core.wmem_default = 131072
+net.core.rmem_max = 4194304
+net.core.wmem_max = 4194304
+net.ipv4.tcp_rmem = 4096 87380 4194304
+net.ipv4.tcp_wmem = 4096 65536 4194304
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_autocorking = 0
+net.ipv4.tcp_thin_linear_timeouts = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 0
 net.ipv4.tcp_fastopen = 3
@@ -375,8 +377,12 @@ global
     group haproxy
     daemon
     maxconn 65535
-    tune.bufsize 65536
-    tune.maxrewrite 16384
+    tune.bufsize 16384
+    tune.maxrewrite 4096
+    tune.rcvbuf.client 32768
+    tune.sndbuf.client 32768
+    tune.rcvbuf.server 16384
+    tune.sndbuf.server 16384
     tune.ssl.cachesize 100000
     tune.ssl.lifetime 600
     tune.ssl.default-dh-param 2048
@@ -468,16 +474,18 @@ frontend fe_xray_mux
     timeout client-fin 1s
 
     # Unified Real Client IP Priority (BunnyCDN -> CloudFront -> CF -> True-Client-IP -> XFF -> X-Real-IP -> Direct src)
-    http-request set-var(req.real_ip) req.hdr_ip(X-Forwarded-For,1) if { req.hdr(X-Forwarded-For) -m found }
-    http-request set-var(req.real_ip) req.hdr(X-Real-IP) if !{ var(req.real_ip) -m found } { req.hdr(X-Real-IP) -m found }
-    http-request set-var(req.real_ip) req.hdr(True-Client-IP) if { req.hdr(True-Client-IP) -m found }
-    http-request set-var(req.real_ip) req.hdr(CF-Connecting-IP) if { req.hdr(CF-Connecting-IP) -m found } !{ req.hdr(CDN-PullZone) -m found } !{ req.hdr(CDN-RequestCountryCode) -m found }
-    http-request set-var(req.real_ip) req.hdr(CloudFront-Viewer-Address),regsub(:[0-9]+$,) if { req.hdr(CloudFront-Viewer-Address) -m found }
-    http-request set-var(req.real_ip) req.hdr(B-CDN-Viewer-Address),regsub(:[0-9]+$,) if { req.hdr(B-CDN-Viewer-Address) -m found }
-    http-request set-var(req.real_ip) src if !{ var(req.real_ip) -m found }
+    http-request set-var(sess.real_ip) req.hdr_ip(X-Forwarded-For,1) if { req.hdr(X-Forwarded-For) -m found }
+    http-request set-var(sess.real_ip) req.hdr(X-Real-IP) if !{ var(sess.real_ip) -m found } { req.hdr(X-Real-IP) -m found }
+    http-request set-var(sess.real_ip) req.hdr(True-Client-IP) if { req.hdr(True-Client-IP) -m found }
+    http-request set-var(sess.real_ip) req.hdr(CF-Connecting-IP) if { req.hdr(CF-Connecting-IP) -m found } !{ req.hdr(CDN-PullZone) -m found } !{ req.hdr(CDN-RequestCountryCode) -m found }
+    http-request set-var(sess.real_ip) req.hdr(CloudFront-Viewer-Address),regsub(:[0-9]+$,) if { req.hdr(CloudFront-Viewer-Address) -m found }
+    http-request set-var(sess.real_ip) req.hdr(B-CDN-Viewer-Address),regsub(:[0-9]+$,) if { req.hdr(B-CDN-Viewer-Address) -m found }
+    http-request set-var(sess.real_ip) src if !{ var(sess.real_ip) -m found }
 
-    http-request set-header X-Real-IP %[var(req.real_ip)]
-    http-request set-header X-Forwarded-For %[var(req.real_ip)]
+    http-request set-src hdr_ip(X-Forwarded-For,1) if { req.hdr(X-Forwarded-For) -m found }
+    http-request set-src hdr_ip(CF-Connecting-IP) if { req.hdr(CF-Connecting-IP) -m found }
+    http-request set-header X-Real-IP %[var(sess.real_ip)]
+    http-request set-header X-Forwarded-For %[var(sess.real_ip)]
 
     use_backend be_xray_vless_grpc  if { path_beg -i /alyan-vless-grpc }
     use_backend be_xray_vmess_grpc  if { path_beg -i /alyan-vmess-grpc }
@@ -513,7 +521,7 @@ backend be_xray_vless_ws
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_vless_ws 127.0.0.1:10001
 
@@ -521,7 +529,7 @@ backend be_xray_vmess_ws
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_vmess_ws 127.0.0.1:10002
 
@@ -529,7 +537,7 @@ backend be_xray_trojan_ws
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_trojan_ws 127.0.0.1:10003
 
@@ -537,7 +545,7 @@ backend be_xray_vless_xhttp
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_vless_xhttp 127.0.0.1:10031
 
@@ -545,7 +553,7 @@ backend be_xray_vless_grpc
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_vless_grpc 127.0.0.1:10011 proto h2
 
@@ -553,7 +561,7 @@ backend be_xray_vmess_grpc
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_vmess_grpc 127.0.0.1:10012 proto h2
 
@@ -561,7 +569,7 @@ backend be_xray_trojan_grpc
     mode http
     option abortonclose
     timeout server 1h
-    timeout tunnel 15m
+    timeout tunnel 1h
     timeout server-fin 1s
     server xray_trojan_grpc 127.0.0.1:10013 proto h2
 
@@ -1087,6 +1095,15 @@ def query_haproxy_sessions() -> tuple[dict[str, str], dict[str, str], list[str],
                     tls_loop_map[lp] = c_ip
             parsed_blocks.append((src_tok, src_port, be_name, lports))
 
+        for _ in range(3):
+            for src_tok, src_port, be_name, lports in parsed_blocks:
+                c_ip = clean_public_ip(src_tok)
+                if not c_ip and src_tok.startswith("127.0.0.1:") and src_port in tls_loop_map:
+                    c_ip = tls_loop_map[src_port]
+                if c_ip and be_name in ("be_tls_loop", "be_xray_mux", "be_xray_h2c", "be_nginx_ws", "be_nginx_h2c"):
+                    for lp in lports:
+                        tls_loop_map[lp] = c_ip
+
         for src_tok, src_port, be_name, lports in parsed_blocks:
             client_ip = clean_public_ip(src_tok)
             if not client_ip and src_tok.startswith("127.0.0.1:") and src_port in tls_loop_map:
@@ -1344,14 +1361,63 @@ PROTO_PORTS = {
     "trojan": (10003, 10013, 10023),
 }
 ALL_XRAY_PORTS = (10001, 10002, 10003, 10011, 10012, 10013, 10023, 10031)
+XRAY_SOCK_CACHE_FILE = Path("/run/alyan-xray-sockets.json")
 XRAY_LAST_ACTIVE_TS: dict[str, float] = {}
 XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int | str]] = {}
+UID_LAST_KNOWN_IP: dict[str, str] = {}
 UID_TCP_CLOSE_MONO: dict[str, list[float]] = {}
+UID_NET_TCP_CLOSE_MONO: dict[tuple[str, str], list[float]] = {}
 IP_TCP_CLOSE_MONO: dict[str, list[float]] = {}
 SS_RX_BYTES_RE = re.compile(r"\bbytes_received:(\d+)")
 SS_TX_BYTES_RE = re.compile(r"\bbytes_sent:(\d+)")
 SS_LASTSND_RE = re.compile(r"\blastsnd:(\d+)")
 SS_LASTRCV_RE = re.compile(r"\blastrcv:(\d+)")
+
+
+def load_xray_socket_cache():
+    if not XRAY_SOCK_CACHE_FILE.exists():
+        return
+    try:
+        data = json.loads(XRAY_SOCK_CACHE_FILE.read_text(encoding="utf-8"))
+        for k, v in (data.get("last_ip") or {}).items():
+            if k and v and not is_trusted_cdn(str(v)):
+                UID_LAST_KNOWN_IP[str(k)] = str(v)
+        now_mono = time.monotonic()
+        for sk, sv in (data.get("sockets") or {}).items():
+            if isinstance(sv, dict) and sv.get("uid") and sv.get("ip"):
+                XRAY_SOCKET_RX_STATE[str(sk)] = {
+                    "first_seen": now_mono - 5.0,
+                    "last_io_mono": now_mono - 1.0,
+                    "birth_ts": float(sv.get("birth_ts") or time.time()),
+                    "rx_bytes": int(sv.get("rx_bytes") or 0),
+                    "tx_bytes": int(sv.get("tx_bytes") or 0),
+                    "proto": str(sv.get("proto") or "vless"),
+                    "uid": str(sv.get("uid") or ""),
+                    "ip": str(sv.get("ip") or ""),
+                }
+    except Exception:
+        pass
+
+
+def save_xray_socket_cache():
+    try:
+        socks = {
+            sk: {
+                "birth_ts": sv.get("birth_ts", 0),
+                "rx_bytes": sv.get("rx_bytes", 0),
+                "tx_bytes": sv.get("tx_bytes", 0),
+                "proto": sv.get("proto", "vless"),
+                "uid": sv.get("uid", ""),
+                "ip": sv.get("ip", ""),
+            }
+            for sk, sv in XRAY_SOCKET_RX_STATE.items()
+            if sv.get("uid") and sv.get("ip")
+        }
+        tmp = XRAY_SOCK_CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"last_ip": UID_LAST_KNOWN_IP, "sockets": socks}), encoding="utf-8")
+        tmp.replace(XRAY_SOCK_CACHE_FILE)
+    except Exception:
+        pass
 
 
 def scan_active_proto_sockets(
@@ -1370,23 +1436,21 @@ def scan_active_proto_sockets(
     dict[str, int],
     dict[tuple[str, str], int],
     dict[tuple[str, str], int],
+    dict[tuple[str, str], int],
     dict[str, int],
 ]:
     """
     Direct HAProxy -> Xray Per-User (`uid`) & Per-Session (`(uid, ip)` / `(uid, net_key)`) Socket Scanner:
-      1. Inspects all ESTAB sockets on Xray ports (`ss -tin`).
-      2. Attributes each socket (`lport:rport`) to its exact `(uid, ip)` via:
-         - HAProxy direct socket table (`xray_port_to_ip[rport]`)
-         - Xray access.log `accepted tcp:` timestamp correlation (`birth_ts` & `last_io_ts`)
-         - Xray `statsonlineiplist` per-IP activity timestamp (`om_ip_ts_by_uid`)
-         - Active single-user `statsonlineiplist` (`om_by_uid`) fallback
-      3. Classifies sockets by `bytes_sent` (`tx_b`):
-         - `tx_b <= 240` after `1.2s`: Blocked UDP stream closed individually (`ss -K`).
-         - `tx_b < 600` with `idle >= 1.2s`: Finished one-shot DNS `:53` query (ignored).
-         - `tx_b >= 600` (or nascent `tx_b > 140` with `idle < 1.2s`): Active established TCP
-           tunnel counted per-protocol, per-`uid`, per-`(uid, ip)`, and per-`(uid, net_key)`.
-           NEVER killed by `ss -K` while connected!
+      1. Inspects all ESTAB sockets on Xray ports (`ss -tin`) and cleans lingering CLOSE-WAIT sockets.
+      2. Attributes each socket (`lport:rport`) to its exact `(uid, ip)` and locks attribution for the
+         lifetime of that socket so background expiry of Xray's 20s OnlineMap never causes blinking.
+      3. Closes ONLY 236-byte blocked UDP blackhole responses (`230 <= tx_b <= 240` after `1.2s`).
+         Counts all genuine open ESTAB tunnel sockets (`tx_b >= 129`, `idle_sec < 300s`) without ever
+         killing active or idle WebSocket tunnels.
     """
+    if not XRAY_SOCKET_RX_STATE and not UID_LAST_KNOWN_IP:
+        load_xray_socket_cache()
+
     live_counts = {"vless": 0, "vmess": 0, "trojan": 0}
     min_idle_by_proto = {"vless": 9999.0, "vmess": 9999.0, "trojan": 9999.0}
     untagged_by_proto = {"vless": 0, "vmess": 0, "trojan": 0}
@@ -1407,6 +1471,27 @@ def scan_active_proto_sockets(
             non_cdn = [ip for ip in ip_list if not is_trusted_cdn(ip)]
             use_ips = non_cdn if non_cdn else ip_list
             for ip_v in use_ips:
+                if not is_trusted_cdn(ip_v):
+                    UID_LAST_KNOWN_IP[u_id] = ip_v
+                if (u_id, ip_v) not in proto_active_pairs[pr]:
+                    proto_active_pairs[pr].append((u_id, ip_v))
+
+    for u_id, sess_map in XRAY_SESSIONS.items():
+        pr = uuid_to_proto.get(u_id, "vless")
+        if pr in proto_active_pairs:
+            for s_obj in sess_map.values():
+                p_ip = s_obj.get("primary_ip")
+                if p_ip and not is_trusted_cdn(str(p_ip)):
+                    if (u_id, str(p_ip)) not in proto_active_pairs[pr]:
+                        proto_active_pairs[pr].append((u_id, str(p_ip)))
+
+    for ev in reversed(accept_events):
+        u_id = str(ev.get("uid") or "")
+        ip_v = str(ev.get("ip") or "")
+        pr = str(ev.get("proto") or "vless")
+        if u_id and ip_v and not is_trusted_cdn(ip_v):
+            UID_LAST_KNOWN_IP.setdefault(u_id, ip_v)
+            if pr in proto_active_pairs and not proto_active_pairs[pr] and (now_ts - float(ev.get("ts") or 0)) <= 120.0:
                 proto_active_pairs[pr].append((u_id, ip_v))
 
     try:
@@ -1416,7 +1501,9 @@ def scan_active_proto_sockets(
         n = len(lines)
         while i < n:
             ln = lines[i]
-            if "ESTAB" not in ln:
+            is_estab = "ESTAB" in ln
+            is_close_wait = not is_estab and "CLOSE-WAIT" in ln
+            if not is_estab and not is_close_wait:
                 i += 1
                 continue
             cols = ln.split()
@@ -1436,6 +1523,19 @@ def scan_active_proto_sockets(
                 i += 2
             else:
                 i += 1
+
+            if is_close_wait:
+                if lport in ALL_XRAY_PORTS:
+                    try:
+                        subprocess.run(
+                            ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=0.5,
+                        )
+                    except Exception:
+                        pass
+                continue
 
             matched_proto = None
             for pr, ports in PROTO_PORTS.items():
@@ -1489,12 +1589,13 @@ def scan_active_proto_sockets(
                     age = max(now_mono - float(prev["first_seen"]), kern_idle)
                     idle_sec = max(now_mono - float(prev["last_io_mono"]), kern_idle)
 
-                # 1. Attribute via HAProxy direct socket table
+                # 1. Attribute via HAProxy direct socket table (only if not already locked to a valid non-CDN IP)
                 rport_str = str(rport)
                 if rport_str in xray_port_to_ip:
                     hap_ip = xray_port_to_ip[rport_str]
-                    prev["ip"] = hap_ip
-                    if hap_ip in ip_to_uid:
+                    if not prev.get("ip") or is_trusted_cdn(str(prev.get("ip"))):
+                        prev["ip"] = hap_ip
+                    if not prev.get("uid") and hap_ip in ip_to_uid:
                         prev["uid"] = ip_to_uid[hap_ip]
 
                 # 2. Attribute via Xray access.log `accepted tcp:` timestamp correlation (birth_ts or last_io_ts)
@@ -1507,7 +1608,7 @@ def scan_active_proto_sockets(
                             continue
                         ev_ts = float(ev["ts"])
                         diff = min(abs(ev_ts - b_ts), abs(ev_ts - last_io_ts))
-                        if diff <= 5.0:
+                        if diff <= 8.0:
                             score = diff if idx not in used_event_idxs else (diff + 2.0)
                             if score < best_diff:
                                 best_diff = score
@@ -1522,7 +1623,7 @@ def scan_active_proto_sockets(
                 if not prev.get("uid") or not prev.get("ip"):
                     best_u = ""
                     best_ip = ""
-                    best_om_diff = 6.0
+                    best_om_diff = 10.0
                     for u_id, ip_ts_map in om_ip_ts_by_uid.items():
                         if uuid_to_proto.get(u_id, "vless") != matched_proto:
                             continue
@@ -1545,9 +1646,14 @@ def scan_active_proto_sockets(
                         prev["ip"] = pairs[0][1]
                     elif prev.get("ip") and str(prev["ip"]) in ip_to_uid:
                         prev["uid"] = ip_to_uid[str(prev["ip"])]
+                    elif prev.get("uid") and str(prev["uid"]) in UID_LAST_KNOWN_IP:
+                        prev["ip"] = UID_LAST_KNOWN_IP[str(prev["uid"])]
 
-                if tx_b <= 240 and age >= 1.2:
-                    # Blocked UDP stream (129-byte HTTP 101 or 236-byte WS reject) -> close individually
+                if prev.get("uid") and prev.get("ip") and not is_trusted_cdn(str(prev["ip"])):
+                    UID_LAST_KNOWN_IP[str(prev["uid"])] = str(prev["ip"])
+
+                if 230 <= tx_b <= 240 and age >= 1.2:
+                    # Blocked UDP stream (129-byte HTTP 101 + 107-byte blackhole 403 = 236 bytes) -> close individually
                     UDP_KILL_TS_LIST.append(now_ts)
                     try:
                         subprocess.run(
@@ -1559,10 +1665,7 @@ def scan_active_proto_sockets(
                     except Exception:
                         pass
                     XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-                elif tx_b < 300 and idle_sec >= 1.2:
-                    # Finished tiny one-shot query (<300B) sitting idle -> do not count as active tunnel
-                    pass
-                elif (tx_b >= 300 and idle_sec < 300.0) or (tx_b > 140 and idle_sec < 1.2):
+                elif tx_b >= 129 and idle_sec < 300.0:
                     live_counts[matched_proto] += 1
                     if idle_sec < min_idle_by_proto[matched_proto]:
                         min_idle_by_proto[matched_proto] = idle_sec
@@ -1592,13 +1695,22 @@ def scan_active_proto_sockets(
     for k in list(XRAY_SOCKET_RX_STATE.keys()):
         if k not in seen_keys:
             prev_st = XRAY_SOCKET_RX_STATE.pop(k, None)
-            if prev_st and int(prev_st.get("tx_bytes", 0)) >= 600:
+            if prev_st and int(prev_st.get("tx_bytes", 0)) >= 129:
                 pr_name = str(prev_st.get("proto") or "vless")
                 if pr_name in REAL_TCP_CLOSE_MONO:
                     REAL_TCP_CLOSE_MONO[pr_name].append(now_mono)
                 st_uid = str(prev_st.get("uid") or "")
+                st_ip = str(prev_st.get("ip") or "")
                 if st_uid:
                     UID_TCP_CLOSE_MONO.setdefault(st_uid, []).append(now_mono)
+                    if st_ip and not is_trusted_cdn(st_ip):
+                        try:
+                            _, st_nk, _ = ip_family_and_prefixes(st_ip)
+                            UID_NET_TCP_CLOSE_MONO.setdefault((st_uid, st_nk), []).append(now_mono)
+                        except ValueError:
+                            pass
+
+    save_xray_socket_cache()
 
     real_closed_by_proto: dict[str, int] = {}
     for pr in ("vless", "vmess", "trojan"):
@@ -1615,6 +1727,15 @@ def scan_active_proto_sockets(
         else:
             UID_TCP_CLOSE_MONO.pop(u_k, None)
 
+    uid_net_closed: dict[tuple[str, str], int] = {}
+    for un_k in list(UID_NET_TCP_CLOSE_MONO.keys()):
+        lst = [t for t in UID_NET_TCP_CLOSE_MONO.get(un_k, []) if (now_mono - t) <= 2.5]
+        if lst:
+            UID_NET_TCP_CLOSE_MONO[un_k] = lst
+            uid_net_closed[un_k] = len(lst)
+        else:
+            UID_NET_TCP_CLOSE_MONO.pop(un_k, None)
+
     return (
         live_counts,
         min_idle_by_proto,
@@ -1622,6 +1743,7 @@ def scan_active_proto_sockets(
         uid_counts,
         uid_min_idle,
         uid_closed,
+        uid_net_closed,
         uid_ip_counts,
         uid_net_counts,
         untagged_by_proto,
@@ -1743,15 +1865,16 @@ def update_vless_user_sessions(
     online_map_ok: bool,
     active_traffic: bool,
     user_active_sockets: int,
+    user_closed_recent: int,
+    uid_net_closed: dict[tuple[str, str], int],
     uid_ip_counts: dict[tuple[str, str], int],
     uid_net_counts: dict[tuple[str, str], int],
     now_ts: float,
 ) -> tuple[list[str], int]:
     """
     Pure Kernel-Socket + Fresh-Activity Session Engine (S1, S2... S10):
-      - Never kills established TCP sockets (`tx_b >= 600`) while connected (0% blink on page/video finish!).
-      - Filters out stale Xray `statsonlineiplist` cache entries when `(uid, net_key)` has 0 open kernel sockets
-        and `now_ts - raw_ts > 2.5s` (0% blink after disconnect!).
+      - Never kills established TCP sockets while connected (0% blink on page/video finish or long idle!).
+      - Instantly drops to Offline (`<= 1.0s`) the moment all open sockets for `(uid, net_key)` close.
       - Tracks each user (`Alyan` vs `Test`) and each CGNAT `/16` session (`S1..S10`) independently.
     """
     sessions = XRAY_SESSIONS.setdefault(uid, {})
@@ -1759,15 +1882,29 @@ def update_vless_user_sessions(
     if active_traffic:
         XRAY_LAST_ACTIVE_TS[uid] = now_ts
 
-    filtered_recent_ips = list(recent_log_ips)
+    # Instant <= 1s Disconnect: If the user's open tunnel sockets just closed and 0 active sockets remain
+    if user_active_sockets == 0 and user_closed_recent >= 1:
+        sessions.clear()
+        XRAY_SESSION_SEQ[uid] = 0
+        return [], 0
+
+    filtered_recent_ips = list(recent_log_ips) if (user_active_sockets > 0 or user_closed_recent == 0) else []
     recent_set_fast = set(filtered_recent_ips)
 
-    # Keep only IPs in live_om_ips that either have active HAProxy connection, kernel socket, or fresh activity (<=2.5s)
     active_om_ips: list[str] = []
+    # 1. Always include every non-CDN IP that currently has open ESTAB kernel sockets for this user
+    for (u_k, sock_ip), s_cnt in uid_ip_counts.items():
+        if u_k == uid and s_cnt > 0 and sock_ip and not is_trusted_cdn(sock_ip):
+            if sock_ip not in active_om_ips:
+                active_om_ips.append(sock_ip)
+
+    # 2. Check IPs from Xray statsonlineiplist
     for ip in live_om_ips:
+        if ip in active_om_ips:
+            continue
         ip_ts_val = om_ip_ts.get(ip, 0)
         if is_trusted_cdn(ip):
-            if active_traffic or (ip_ts_val > 0 and (now_ts - float(ip_ts_val)) <= 2.5):
+            if active_traffic or (ip_ts_val > 0 and (now_ts - float(ip_ts_val)) <= 0.9):
                 active_om_ips.append(ip)
             continue
         try:
@@ -1784,25 +1921,24 @@ def update_vless_user_sessions(
 
         has_alive_socket = (sock_cnt > 0)
         time_since_seen = (now_ts - float(ip_ts_val)) if ip_ts_val > 0 else 999.0
-        hap_connected = (ip in proto_hap_ips)
+        hap_connected = (ip in proto_hap_ips) and (user_active_sockets > 0)
         last_acc_val = LAST_ACCEPT_BY_UID_NET.get(uid, {}).get(net_k, 0.0)
+        net_just_closed = uid_net_closed.get((uid, net_k), 0) >= 1
+        if not has_alive_socket and net_just_closed:
+            continue
+
         is_fresh = (
-            (active_traffic and time_since_seen <= 2.5)
+            (active_traffic and time_since_seen <= 0.9)
             or (ip in recent_set_fast)
-            or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 2.0)
+            or (last_acc_val > 0 and (now_ts - float(last_acc_val)) <= 0.9)
         )
-        # IP is truly active if:
-        # 1. Open kernel socket for this user/IP & seen within 300s (0% blink during long idle!)
-        # 2. Direct HAProxy connection verified & seen within 300s
-        # 3. Fresh traffic or new accept event within 2.0s
-        # 4. Grace period of <= 2.0s after disconnect before dropping
         if (has_alive_socket and time_since_seen <= 300.0):
             active_om_ips.append(ip)
         elif (hap_connected and time_since_seen <= 300.0):
             active_om_ips.append(ip)
         elif is_fresh:
             active_om_ips.append(ip)
-        elif time_since_seen <= 2.0:
+        elif time_since_seen <= 0.8:
             active_om_ips.append(ip)
 
     filtered_om_ips = active_om_ips
@@ -1915,7 +2051,7 @@ def update_vless_user_sessions(
                     "last_seen": now_ts,
                     "_touched": True,
                 }
-    elif not sessions and cdn_cands and (active_traffic or bool(filtered_om_ips)):
+    elif not sessions and cdn_cands and (active_traffic or bool(filtered_om_ips) or user_active_sockets > 0):
         sessions["S-CDN"] = {
             "session_id": "S-CDN",
             "primary_ip": cdn_cands[0],
@@ -1928,7 +2064,7 @@ def update_vless_user_sessions(
             "last_seen": now_ts,
             "_touched": True,
         }
-    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(filtered_om_ips)):
+    elif sessions and cdn_cands and "S-CDN" in sessions and (active_traffic or bool(filtered_om_ips) or user_active_sockets > 0):
         sessions["S-CDN"]["ips"].update(cdn_cands)
         sessions["S-CDN"]["last_seen"] = now_ts
 
@@ -1944,14 +2080,18 @@ def update_vless_user_sessions(
         if len(sessions) == 1 and sess_sockets == 0 and user_active_sockets > 0:
             sess_sockets = user_active_sockets
 
-        hap_has_ip = any(ip in proto_hap_ips for ip in s["ips"])
-        if sess_sockets > 0 or has_open_stream or (hap_has_ip and (now_ts - s["last_seen"]) <= 15.0):
-            s["last_seen"] = now_ts
-        elif (now_ts - s["created_at"]) > 2.0 and not active_traffic:
+        sess_closed_now = any(uid_net_closed.get((uid, nk), 0) >= 1 for nk in s["net_keys"])
+        if sess_sockets == 0 and sess_closed_now:
             sessions.pop(sid, None)
             continue
 
-        if (now_ts - s["last_seen"]) > 2.0:
+        if sess_sockets > 0 or has_open_stream:
+            s["last_seen"] = now_ts
+        elif (now_ts - s["created_at"]) > 0.8 and not active_traffic:
+            sessions.pop(sid, None)
+            continue
+
+        if (now_ts - s["last_seen"]) > 0.8:
             sessions.pop(sid, None)
 
     if not sessions:
@@ -2083,6 +2223,7 @@ def poll_xray_stats_and_ips(
         uid_counts,
         uid_min_idle,
         uid_closed,
+        uid_net_closed,
         uid_ip_counts,
         uid_net_counts,
         untagged_by_proto,
@@ -2111,18 +2252,6 @@ def poll_xray_stats_and_ips(
 
         u_sock_cnt = uid_counts.get(uid, 0)
         u_cls_rec = uid_closed.get(uid, 0)
-        u_min_idle = uid_min_idle.get(uid, 9999.0)
-
-        # Instant Disconnect Detection: If sockets just closed (disconnect) and all remaining sockets
-        # have been idle for >= 2.0s with zero traffic delta, remaining sockets are dead keepalive zombies!
-        if u_cls_rec >= 1 and u_min_idle >= 2.0 and not active_traffic:
-            u_sock_cnt = 0
-            for k_ip in list(uid_ip_counts.keys()):
-                if k_ip[0] == uid:
-                    uid_ip_counts[k_ip] = 0
-            for k_net in list(uid_net_counts.keys()):
-                if k_net[0] == uid:
-                    uid_net_counts[k_net] = 0
 
         # Determine active client IPs for this protocol from HAProxy
         if proto in ("vless", "vmess"):
@@ -2164,6 +2293,8 @@ def poll_xray_stats_and_ips(
             online_map_ok=online_map_ok,
             active_traffic=active_traffic,
             user_active_sockets=u_sock_cnt,
+            user_closed_recent=u_cls_rec,
+            uid_net_closed=uid_net_closed,
             uid_ip_counts=uid_ip_counts,
             uid_net_counts=uid_net_counts,
             now_ts=now_ts,
@@ -2399,7 +2530,7 @@ def main():
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.25)
 
 
 if __name__ == "__main__":

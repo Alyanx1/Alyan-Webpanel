@@ -11,8 +11,12 @@ global
     group haproxy
     daemon
     maxconn 65535
-    tune.bufsize 65536
+    tune.bufsize 32768
     tune.maxrewrite 16384
+    tune.rcvbuf.client 131072
+    tune.sndbuf.client 131072
+    tune.rcvbuf.server 131072
+    tune.sndbuf.server 131072
     tune.ssl.cachesize 100000
     tune.ssl.lifetime 600
     tune.ssl.default-dh-param 2048

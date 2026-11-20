@@ -973,6 +973,10 @@
       if (openUsersModalBody) openUsersModalBody.innerHTML = sshUsersSheetHtml(getLiveUsersList());
 
       const filtered = items.filter(u => u.username.toLowerCase().includes(STATE.searchSsh.toLowerCase()));
+      const renderKey = filtered.map(u => `${u.username}:${u.status}:${u.online}:${u.used_bytes}:${(u.ips||[]).join(',')}`).join('|');
+      if (host._lastRenderKey === renderKey) return;
+      host._lastRenderKey = renderKey;
+
       host.innerHTML = filtered.length ? `<div class="cards">${filtered.map(u => {
         const isDis = u.status === 'disabled';
         const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
@@ -1065,7 +1069,7 @@
         STATE.cfg = res.cfg;
         paintCards();
       } catch {} finally { sshBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   function showSshTicket(u) {
@@ -1211,6 +1215,10 @@
       if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${protoAll.length} clients · live 2s`;
 
       const list = protoAll.filter(u => u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
+      const renderKey = list.map(u => `${u.uuid}:${u.status}:${u.online}:${u.used_bytes}:${(u.ips||[]).join(',')}`).join('|');
+      if (host._lastRenderKey === renderKey) return;
+      host._lastRenderKey = renderKey;
+
       host.innerHTML = list.length ? `<div class="cards">${list.map(u => {
         const isDis = u.status === 'disabled';
         const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
@@ -1321,7 +1329,7 @@
         STATE.cfg = res.cfg;
         paintXrayCards();
       } catch {} finally { xrayBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   function showXrayLinks(u) {
