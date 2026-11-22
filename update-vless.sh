@@ -35,9 +35,10 @@ for svc in udpgw badvpn-udpgw alyan-udpgw; do
   rm -f "/etc/systemd/system/${svc}.service" 2>/dev/null || true
 done
 pkill -9 -f "udpgw" 2>/dev/null || true
+pkill -9 -f "xray_4users_client|xray_6stream|xray_alyan_6conns|xray_multi_vless|_e2e_client|vps_4users" 2>/dev/null || true
 
-rm -rf /tmp/alyan* /tmp/xray* /tmp/vless* /tmp/vps_* /tmp/test_* /tmp/multi_vless* /tmp/final_test* /root/trace*.py /var/tmp/alyan* /run/alyan-guard.lock /run/alyan-live.tmp /opt/alyan/services/guard/*.bak* /opt/alyan/**/__pycache__ /var/log/nginx/*.gz /var/log/nginx/*.1 2>/dev/null || true
-truncate -s 0 /var/log/xray/access.log /var/log/xray/error.log /var/log/nginx/alyan-xray.log /var/log/nginx/access.log /var/log/nginx/error.log /var/log/alyan/*.log 2>/dev/null || true
+rm -rf /tmp/alyan* /tmp/xray* /tmp/vless* /tmp/vps_* /tmp/test_* /tmp/multi_vless* /tmp/final_test* /root/trace*.py /var/tmp/alyan* /run/alyan-guard.lock /run/alyan-live.tmp /opt/alyan/services/guard/*.bak* /opt/alyan/**/__pycache__ /var/log/alyan-*.log /var/log/alyan-*.out /var/log/nginx/alyan-xray.log /var/log/nginx/*.gz /var/log/nginx/*.1 /etc/sysctl.d/99-alyan-keepalive.conf 2>/dev/null || true
+truncate -s 0 /var/log/xray/access.log /var/log/xray/error.log /var/log/nginx/access.log /var/log/nginx/error.log /var/log/alyan/*.log 2>/dev/null || true
 journalctl --vacuum-size=10M >/dev/null 2>&1 || true
 apt-get clean >/dev/null 2>&1 || true
 
