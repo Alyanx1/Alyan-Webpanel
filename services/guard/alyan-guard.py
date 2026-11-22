@@ -859,13 +859,17 @@ def scan_active_proto_sockets(
         s_ip = str(prev.get("ip") or "")
 
         comp_ips = session_companion_ips.get(s_ip, {s_ip} if s_ip else set())
+        dev_min_idle = min((ip_min_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=idle_sec)
+        dev_last_io_mono = now_mono - dev_min_idle
         recent_ip_closed = bool(
             any(
-                any((now_mono - t) <= 8.0 for t in IP_TCP_CLOSE_MONO.get(c_ip, []))
+                any(
+                    (now_mono - t) <= 8.0 and t >= (dev_last_io_mono - 0.35)
+                    for t in IP_TCP_CLOSE_MONO.get(c_ip, [])
+                )
                 for c_ip in comp_ips
             )
         )
-        dev_min_idle = min((ip_min_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=idle_sec)
 
         if (
             (tx_b <= 240 and age >= 0.8)
@@ -1117,6 +1121,8 @@ def update_vless_user_sessions(
         if sess_sockets > 0 or has_open_stream:
             s["last_seen"] = now_ts
         else:
+            for dead_ip in s["ips"]:
+                IP_TCP_CLOSE_MONO.pop(dead_ip, None)
             sessions.pop(sid, None)
 
     if not sessions:
