@@ -167,7 +167,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless"
+          "path": "/alyan-vless",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -186,7 +187,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess"
+          "path": "/alyan-vmess",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -205,7 +207,8 @@ cat <<'EOF_XRAY_TPL' > /opt/alyan/templates/xray-config.json.tpl
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan"
+          "path": "/alyan-trojan",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -1315,7 +1318,7 @@ def scan_active_proto_sockets(
             for ip_v in use_ips:
                 proto_active_pairs[pr].append((u_id, ip_v))
 
-    active_rows: list[tuple[str, int, int, str, int, int, float, float, dict]] = []
+    active_rows: list[tuple[str, int, int, str, int, int, float, float, float, dict]] = []
 
     try:
         out = subprocess.check_output(["ss", "-tin"], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
@@ -1363,13 +1366,15 @@ def scan_active_proto_sockets(
                 rx_b = int(m_rx.group(1)) if m_rx else 0
                 tx_b = int(m_tx.group(1)) if m_tx else 0
 
-                kern_idle = 0.0
+                kern_snd_idle = int(m_snd.group(1)) / 1000.0 if m_snd else 0.0
+                kern_rcv_idle = int(m_rcv.group(1)) / 1000.0 if m_rcv else 0.0
                 if m_snd and m_rcv:
-                    kern_idle = min(int(m_snd.group(1)), int(m_rcv.group(1))) / 1000.0
+                    kern_idle = min(kern_snd_idle, kern_rcv_idle)
                 elif m_snd:
-                    kern_idle = int(m_snd.group(1)) / 1000.0
-                elif m_rcv:
-                    kern_idle = int(m_rcv.group(1)) / 1000.0
+                    kern_idle = kern_snd_idle
+                else:
+                    kern_idle = kern_rcv_idle
+                kern_rx_idle = kern_rcv_idle if m_rcv else kern_idle
 
                 last_io_ts = now_ts - kern_idle
                 prev = XRAY_SOCKET_RX_STATE.get(sock_key)
@@ -1378,6 +1383,7 @@ def scan_active_proto_sockets(
                     prev = {
                         "first_seen": now_mono - kern_idle,
                         "last_io_mono": now_mono - kern_idle,
+                        "last_rx_mono": now_mono - kern_rx_idle,
                         "birth_ts": birth_ts,
                         "rx_bytes": rx_b,
                         "tx_bytes": tx_b,
@@ -1388,14 +1394,22 @@ def scan_active_proto_sockets(
                     XRAY_SOCKET_RX_STATE[sock_key] = prev
                     age = kern_idle
                     idle_sec = kern_idle
+                    rx_idle_sec = kern_rx_idle
                 else:
-                    if rx_b > int(prev["rx_bytes"]) or tx_b > int(prev["tx_bytes"]):
+                    if rx_b > int(prev["rx_bytes"]):
                         prev["rx_bytes"] = rx_b
+                        prev["last_rx_mono"] = now_mono
+                        prev["last_io_mono"] = now_mono
+                    if tx_b > int(prev["tx_bytes"]):
                         prev["tx_bytes"] = tx_b
                         prev["last_io_mono"] = now_mono
 
                     age = max(now_mono - float(prev["first_seen"]), kern_idle)
                     idle_sec = max(now_mono - float(prev["last_io_mono"]), kern_idle)
+                    rx_idle_sec = max(
+                        now_mono - float(prev.get("last_rx_mono") or prev["last_io_mono"]),
+                        kern_rx_idle,
+                    )
 
                 # 1. Attribute via HAProxy direct socket table
                 rport_str = str(rport)
@@ -1460,15 +1474,15 @@ def scan_active_proto_sockets(
                     elif prev.get("ip") and str(prev["ip"]) in ip_to_uid:
                         prev["uid"] = ip_to_uid[str(prev["ip"])]
 
-                active_rows.append((sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, prev))
+                active_rows.append((sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, rx_idle_sec, prev))
     except Exception:
         pass
 
-    # Pass 2: Detect closed sockets BEFORE evaluating remaining sockets so post-disconnect zombies are caught immediately
+    # Pass 2: Detect closed TCP sockets (>300B; blocked-UDP blackhole sockets are <=242B)
     for k in list(XRAY_SOCKET_RX_STATE.keys()):
         if k not in seen_keys:
             prev_st = XRAY_SOCKET_RX_STATE.pop(k, None)
-            if prev_st and int(prev_st.get("tx_bytes", 0)) > 240:
+            if prev_st and int(prev_st.get("tx_bytes", 0)) > 300:
                 st_uid = str(prev_st.get("uid") or "")
                 if st_uid:
                     UID_TCP_CLOSE_MONO.setdefault(st_uid, []).append(now_mono)
@@ -1483,15 +1497,17 @@ def scan_active_proto_sockets(
         else:
             IP_TCP_CLOSE_MONO.pop(ip_k, None)
 
-    # Calculate minimum idle time per IP across all its currently open sockets (>240B)
-    ip_min_idle_map: dict[str, float] = {}
-    for _, _, _, _, _, tx_b, _, idle_sec, prev in active_rows:
-        if tx_b > 240:
+    # Calculate minimum client-RX idle time per IP across all its open TCP sockets (>300B).
+    # With Xray wsSettings heartbeatPeriod=2, a connected client replies with a 6B WS Pong every 2.0s,
+    # keeping rx_idle_sec <= 2.2s even when 100% idle, whereas a disconnected zombie socket never replies!
+    ip_min_rx_idle_map: dict[str, float] = {}
+    for _, _, _, _, _, tx_b, _, _, rx_idle_sec, prev in active_rows:
+        if tx_b > 300:
             s_ip = str(prev.get("ip") or "")
-            if s_ip and idle_sec < ip_min_idle_map.get(s_ip, 9999.0):
-                ip_min_idle_map[s_ip] = idle_sec
+            if s_ip and rx_idle_sec < ip_min_rx_idle_map.get(s_ip, 9999.0):
+                ip_min_rx_idle_map[s_ip] = rx_idle_sec
 
-    # Share close & min_idle state across paired CGNAT companion IPs of the same active session
+    # Share close & min_rx_idle state across paired CGNAT companion IPs of the same active session
     session_companion_ips: dict[str, set[str]] = {}
     for sess_dict in XRAY_SESSIONS.values():
         for s_obj in sess_dict.values():
@@ -1499,18 +1515,18 @@ def scan_active_proto_sockets(
             for ip_member in s_ips:
                 session_companion_ips[ip_member] = s_ips
 
-    # Pass 3: Kill blocked-UDP, finished DNS (<600B), and post-disconnect half-open zombie sockets (e.g. :5228 / :443)
-    for sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, prev in active_rows:
+    # Pass 3: Clean blocked-UDP (<=300B) and dead half-open zombie sockets that missed WS Pong frames
+    for sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, rx_idle_sec, prev in active_rows:
         s_uid = str(prev.get("uid") or "")
         s_ip = str(prev.get("ip") or "")
 
         comp_ips = session_companion_ips.get(s_ip, {s_ip} if s_ip else set())
-        dev_min_idle = min((ip_min_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=idle_sec)
-        dev_last_io_mono = now_mono - dev_min_idle
+        dev_min_rx_idle = min((ip_min_rx_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=rx_idle_sec)
+        dev_last_rx_mono = now_mono - dev_min_rx_idle
         recent_ip_closed = bool(
             any(
                 any(
-                    (now_mono - t) <= 8.0 and t >= (dev_last_io_mono - 0.35)
+                    (now_mono - t) <= 8.0 and t >= (dev_last_rx_mono - 0.35)
                     for t in IP_TCP_CLOSE_MONO.get(c_ip, [])
                 )
                 for c_ip in comp_ips
@@ -1518,9 +1534,9 @@ def scan_active_proto_sockets(
         )
 
         if (
-            (tx_b <= 240 and age >= 0.8)
-            or (tx_b < 600 and idle_sec >= 1.0)
-            or (recent_ip_closed and dev_min_idle >= 1.0 and idle_sec >= 1.0)
+            (tx_b <= 300 and age >= 1.0)
+            or (recent_ip_closed and dev_min_rx_idle >= 2.6 and rx_idle_sec >= 2.6)
+            or (lport in (10001, 10002, 10003) and dev_min_rx_idle >= 4.8 and rx_idle_sec >= 4.8)
         ):
             try:
                 subprocess.run(
@@ -1532,7 +1548,7 @@ def scan_active_proto_sockets(
             except Exception:
                 pass
             XRAY_SOCKET_RX_STATE.pop(sock_key, None)
-        elif tx_b > 240:
+        elif tx_b > 300:
             if s_uid:
                 uid_counts[s_uid] = uid_counts.get(s_uid, 0) + 1
                 if s_ip:
@@ -1643,6 +1659,7 @@ def update_vless_user_sessions(
     active_traffic: bool,
     user_active_sockets: int,
     uid_ip_counts: dict[tuple[str, str], int],
+    u_accept_ts: dict[str, float],
     now_ts: float,
 ) -> tuple[list[str], int]:
     sessions = XRAY_SESSIONS.setdefault(uid, {})
@@ -1708,16 +1725,20 @@ def update_vless_user_sessions(
                             matched_sess = s
                             break
 
-            # Rule 3: Smart 1.8s Initial Handshake CGNAT Companion Pairing (1 mobile phone = 1 user)
+            # Rule 3: Single-Phone 4G CGNAT Dual-Gateway Pairing (Initial 1.8s Handshake OR Simultaneous App/YouTube Burst <=1.2s)
             if matched_sess is None and ver == 4:
+                ip_acc = u_accept_ts.get(ip, 0.0)
                 for s in sessions.values():
-                    if (
-                        super_key in s["super_keys"]
-                        and len(s["ips"]) < 2
-                        and (now_ts - float(s["created_at"])) <= 1.8
-                    ):
-                        matched_sess = s
-                        break
+                    if super_key in s["super_keys"] and len(s["ips"]) < 2:
+                        if (now_ts - float(s["created_at"])) <= 1.8:
+                            matched_sess = s
+                            break
+                        if ip_acc > 0.0 and any(
+                            u_accept_ts.get(ex_ip, 0.0) > 0.0 and abs(ip_acc - u_accept_ts[ex_ip]) <= 1.2
+                            for ex_ip in s["ips"]
+                        ):
+                            matched_sess = s
+                            break
 
             if matched_sess is not None:
                 matched_sess["ips"].add(ip)
@@ -1744,6 +1765,37 @@ def update_vless_user_sessions(
                     "created_at": now_ts,
                     "last_seen": now_ts,
                 }
+
+        # Consolidate two single-IP sessions on the same /16 CGNAT pool if they later fire a simultaneous app/YouTube burst (<=1.2s)
+        sids = list(sessions.keys())
+        for i_a in range(len(sids)):
+            sid_a = sids[i_a]
+            if sid_a not in sessions:
+                continue
+            s_a = sessions[sid_a]
+            if len(s_a["ips"]) >= 2:
+                continue
+            for i_b in range(i_a + 1, len(sids)):
+                sid_b = sids[i_b]
+                if sid_b not in sessions:
+                    continue
+                s_b = sessions[sid_b]
+                if (
+                    len(s_a["ips"]) + len(s_b["ips"]) <= 2
+                    and (s_a["super_keys"] & s_b["super_keys"])
+                    and any(
+                        u_accept_ts.get(ip_a, 0.0) > 0.0
+                        and u_accept_ts.get(ip_b, 0.0) > 0.0
+                        and abs(u_accept_ts[ip_a] - u_accept_ts[ip_b]) <= 1.2
+                        for ip_a in s_a["ips"]
+                        for ip_b in s_b["ips"]
+                    )
+                ):
+                    s_a["ips"].update(s_b["ips"])
+                    s_a["net_keys"].update(s_b["net_keys"])
+                    s_a["super_keys"].update(s_b["super_keys"])
+                    sessions.pop(sid_b, None)
+                    break
     elif not sessions and cdn_cands and active_traffic and user_active_sockets > 0:
         sessions["S-CDN"] = {
             "session_id": "S-CDN",
@@ -1824,6 +1876,7 @@ def poll_xray_stats_and_ips(
     om_by_uid, om_ip_ts_by_uid = query_xray_online_map(xray_users, tag_to_uuid)
     accept_events: list[dict] = []
     ip_to_uid: dict[str, str] = {}
+    last_accept_by_uid_ip: dict[str, dict[str, float]] = {}
 
     for u_id, ip_lst in om_by_uid.items():
         for ip_v in ip_lst:
@@ -1876,6 +1929,9 @@ def poll_xray_stats_and_ips(
                     )
                     if not is_trusted_cdn(ip_clean):
                         ip_to_uid[ip_clean] = uid
+                        u_acc_map = last_accept_by_uid_ip.setdefault(uid, {})
+                        if log_ts > u_acc_map.get(ip_clean, 0.0):
+                            u_acc_map[ip_clean] = log_ts
         except Exception:
             pass
 
@@ -1926,6 +1982,7 @@ def poll_xray_stats_and_ips(
             active_traffic=active_traffic,
             user_active_sockets=u_sock_cnt,
             uid_ip_counts=uid_ip_counts,
+            u_accept_ts=last_accept_by_uid_ip.get(uid, {}),
             now_ts=now_ts,
         )
         ips_by_uuid[uid] = u_ips
