@@ -1300,6 +1300,11 @@ def scan_active_proto_sockets(
     now_ts = time.time()
     seen_keys: set[str] = set()
     used_event_idxs: set[int] = set()
+    claimed_ev_raws: set[str] = {
+        str(st.get("ev_raw"))
+        for st in XRAY_SOCKET_RX_STATE.values()
+        if st.get("ev_raw")
+    }
 
     proto_active_pairs: dict[str, list[tuple[str, str]]] = {"vless": [], "vmess": [], "trojan": []}
     for u_id, ip_list in om_by_uid.items():
@@ -1411,15 +1416,21 @@ def scan_active_proto_sockets(
                         ev_ts = float(ev["ts"])
                         diff = min(abs(ev_ts - b_ts), abs(ev_ts - last_io_ts))
                         if diff <= 5.0:
-                            score = diff if idx not in used_event_idxs else (diff + 2.0)
+                            ev_r = str(ev.get("raw") or "")
+                            is_claimed = (ev_r and ev_r in claimed_ev_raws) or (idx in used_event_idxs)
+                            score = diff if not is_claimed else (diff + 10.0)
                             if score < best_diff:
                                 best_diff = score
                                 best_idx = idx
                     if best_idx >= 0:
                         used_event_idxs.add(best_idx)
                         ev_m = accept_events[best_idx]
+                        ev_r = str(ev_m.get("raw") or "")
+                        if ev_r:
+                            claimed_ev_raws.add(ev_r)
                         prev["uid"] = str(ev_m["uid"])
                         prev["ip"] = str(ev_m["ip"])
+                        prev["ev_raw"] = ev_r
 
                 # 3. Attribute via Xray statsonlineiplist per-IP activity timestamp (`om_ip_ts_by_uid`)
                 if not prev.get("uid") or not prev.get("ip"):
@@ -1860,6 +1871,7 @@ def poll_xray_stats_and_ips(
                             "proto": u_proto,
                             "uid": uid,
                             "ip": ip_clean,
+                            "raw": ln.strip(),
                         }
                     )
                     if not is_trusted_cdn(ip_clean):
