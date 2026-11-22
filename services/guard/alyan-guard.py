@@ -109,7 +109,7 @@ PROTO_PORTS = {
 ALL_XRAY_PORTS = (10001, 10002, 10003, 10011, 10012, 10013, 10023, 10031)
 XRAY_SOCKET_RX_STATE: dict[str, dict[str, float | int | str]] = {}
 UID_TCP_CLOSE_MONO: dict[str, list[float]] = {}
-IP_TCP_CLOSE_MONO: dict[str, list[float]] = {}
+IP_TCP_CLOSE_MONO: dict[str, list[tuple[float, float]]] = {}
 
 DROPBEAR_AUTH_RE = re.compile(
     r"(?:dropbear\[(\d+)\]|\[(\d+)\]).*?(?:Password|Pubkey) auth succeeded for '([^']+)'",
@@ -845,31 +845,33 @@ def scan_active_proto_sockets(
         if k not in seen_keys:
             prev_st = XRAY_SOCKET_RX_STATE.pop(k, None)
             if prev_st and int(prev_st.get("tx_bytes", 0)) > 300:
+                closed_idle = max(0.0, now_mono - float(prev_st.get("last_io_mono") or now_mono))
                 st_uid = str(prev_st.get("uid") or "")
                 if st_uid:
                     UID_TCP_CLOSE_MONO.setdefault(st_uid, []).append(now_mono)
                 st_ip = str(prev_st.get("ip") or "")
                 if st_ip:
-                    IP_TCP_CLOSE_MONO.setdefault(st_ip, []).append(now_mono)
+                    IP_TCP_CLOSE_MONO.setdefault(st_ip, []).append((now_mono, closed_idle))
 
     for ip_k in list(IP_TCP_CLOSE_MONO.keys()):
-        lst_ip = [t for t in IP_TCP_CLOSE_MONO.get(ip_k, []) if (now_mono - t) <= 8.0]
+        lst_ip = [item for item in IP_TCP_CLOSE_MONO.get(ip_k, []) if (now_mono - item[0]) <= 2.5]
         if lst_ip:
             IP_TCP_CLOSE_MONO[ip_k] = lst_ip
         else:
             IP_TCP_CLOSE_MONO.pop(ip_k, None)
 
-    # Calculate minimum client-RX idle time per IP across all its open TCP sockets (>300B).
-    # With Xray wsSettings heartbeatPeriod=2, a connected client replies with a 6B WS Pong every 2.0s,
-    # keeping rx_idle_sec <= 2.2s even when 100% idle, whereas a disconnected zombie socket never replies!
-    ip_min_rx_idle_map: dict[str, float] = {}
-    for _, _, _, _, _, tx_b, _, _, rx_idle_sec, prev in active_rows:
+    # Calculate minimum idle time and open TCP socket count (>300B) per IP
+    ip_min_idle_map: dict[str, float] = {}
+    ip_open_tcp_count: dict[str, int] = {}
+    for _, _, _, _, _, tx_b, _, idle_sec, _, prev in active_rows:
         if tx_b > 300:
             s_ip = str(prev.get("ip") or "")
-            if s_ip and rx_idle_sec < ip_min_rx_idle_map.get(s_ip, 9999.0):
-                ip_min_rx_idle_map[s_ip] = rx_idle_sec
+            if s_ip:
+                ip_open_tcp_count[s_ip] = ip_open_tcp_count.get(s_ip, 0) + 1
+                if idle_sec < ip_min_idle_map.get(s_ip, 9999.0):
+                    ip_min_idle_map[s_ip] = idle_sec
 
-    # Share close & min_rx_idle state across paired CGNAT companion IPs of the same active session
+    # Share close, min_idle & open_tcp_count state across paired CGNAT companion IPs of the same session
     session_companion_ips: dict[str, set[str]] = {}
     for sess_dict in XRAY_SESSIONS.values():
         for s_obj in sess_dict.values():
@@ -877,29 +879,32 @@ def scan_active_proto_sockets(
             for ip_member in s_ips:
                 session_companion_ips[ip_member] = s_ips
 
-    # Pass 3: Clean blocked-UDP (<=300B) and dead half-open zombie sockets that missed WS Pong frames
-    for sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, rx_idle_sec, prev in active_rows:
+    # Pass 3: Clean blocked-UDP (<=300B) and lone post-disconnect half-open zombie socket (e.g. :5228)
+    for sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, _, prev in active_rows:
         s_uid = str(prev.get("uid") or "")
         s_ip = str(prev.get("ip") or "")
 
         comp_ips = session_companion_ips.get(s_ip, {s_ip} if s_ip else set())
-        dev_min_rx_idle = min((ip_min_rx_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=rx_idle_sec)
-        dev_last_rx_mono = now_mono - dev_min_rx_idle
-        recent_ip_closed = bool(
-            any(
-                any(
-                    (now_mono - t) <= 8.0 and t >= (dev_last_rx_mono - 0.35)
-                    for t in IP_TCP_CLOSE_MONO.get(c_ip, [])
-                )
-                for c_ip in comp_ips
-            )
+        dev_min_idle = min((ip_min_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=idle_sec)
+        dev_last_io_mono = now_mono - dev_min_idle
+        remaining_dev_sockets = sum(ip_open_tcp_count.get(c_ip, 0) for c_ip in comp_ips)
+
+        dev_close_events = [
+            (t, c_idle)
+            for c_ip in comp_ips
+            for (t, c_idle) in IP_TCP_CLOSE_MONO.get(c_ip, [])
+            if (now_mono - t) <= 2.5 and t >= (dev_last_io_mono - 0.35)
+        ]
+        dev_closed_cnt = len(dev_close_events)
+        has_active_close = any(c_idle <= 8.0 for (_, c_idle) in dev_close_events)
+        is_lone_disconnect_zombie = bool(
+            remaining_dev_sockets == 1
+            and (dev_closed_cnt >= 2 or (dev_closed_cnt == 1 and has_active_close))
+            and dev_min_idle >= 1.2
+            and idle_sec >= 1.2
         )
 
-        if (
-            (tx_b <= 300 and age >= 1.0)
-            or (recent_ip_closed and dev_min_rx_idle >= 2.6 and rx_idle_sec >= 2.6)
-            or (lport in (10001, 10002, 10003) and dev_min_rx_idle >= 4.8 and rx_idle_sec >= 4.8)
-        ):
+        if (tx_b <= 300 and age >= 1.0) or is_lone_disconnect_zombie:
             try:
                 subprocess.run(
                     ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],

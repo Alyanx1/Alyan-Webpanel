@@ -55,8 +55,7 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless",
-          "heartbeatPeriod": 2
+          "path": "/alyan-vless"
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -75,8 +74,7 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess",
-          "heartbeatPeriod": 2
+          "path": "/alyan-vmess"
         },
         "sockopt": {
           "tcpNoDelay": true,
@@ -95,8 +93,7 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan",
-          "heartbeatPeriod": 2
+          "path": "/alyan-trojan"
         },
         "sockopt": {
           "tcpNoDelay": true,
