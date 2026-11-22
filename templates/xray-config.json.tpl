@@ -18,8 +18,8 @@
       "0": {
         "handshake": 6,
         "connIdle": 600,
-        "uplinkOnly": 2,
-        "downlinkOnly": 5,
+        "uplinkOnly": 1,
+        "downlinkOnly": 1,
         "statsUserUplink": true,
         "statsUserDownlink": true,
         "statsUserOnline": true,
@@ -216,7 +216,11 @@
     {
       "tag": "blocked",
       "protocol": "blackhole",
-      "settings": {}
+      "settings": {
+        "response": {
+          "type": "http"
+        }
+      }
     }
   ],
   "routing": {
@@ -226,6 +230,11 @@
         "type": "field",
         "inboundTag": ["api-in"],
         "outboundTag": "api"
+      },
+      {
+        "type": "field",
+        "network": "udp",
+        "outboundTag": "blocked"
       },
       {
         "type": "field",

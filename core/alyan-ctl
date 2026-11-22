@@ -303,6 +303,7 @@ def apply_kernel_network_tuning(iface: str = "eth0"):
                 "net.ipv4.tcp_fastopen = 3",
                 "net.ipv4.tcp_tw_reuse = 1",
                 "net.ipv4.tcp_fin_timeout = 10",
+                "net.ipv4.tcp_retries2 = 15",
                 "net.ipv4.tcp_max_syn_backlog = 65536",
                 "net.ipv4.tcp_max_tw_buckets = 2000000",
                 "net.ipv4.ip_local_port_range = 10240 65535",
