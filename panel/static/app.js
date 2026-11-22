@@ -904,7 +904,7 @@
       if (STATE.bay !== 'core' || document.hidden || coreBusy || $('.ember.flip')) return;
       coreBusy = true;
       try { await draw(); } catch {} finally { coreBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   /* ═════════════════════ 2. SSH ACCOUNTS (6-Corner SVG + 2s Real-Time Sync) ═════════════════════ */
@@ -1515,7 +1515,7 @@
       if (STATE.bay !== 'engine' || document.hidden || engBusy) return;
       engBusy = true;
       try { await drawEngine(); } catch {} finally { engBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   /* ═════════════════════ 5. VPS INFO (Hardware, Wire-Speed Throughput & Load · 2s Sync) ═════════════════════ */
@@ -1596,7 +1596,7 @@
       if (STATE.bay !== 'telemetry' || document.hidden || telBusy) return;
       telBusy = true;
       try { await drawTel(); } catch {} finally { telBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   /* ═════════════════════ 6. SETTINGS (Domain, SSL, Port, Banner, Admin Security) ═════════════════════ */
@@ -1927,7 +1927,7 @@
         items = res.items || [];
         paintAudit();
       } catch {} finally { auditBusy = false; }
-    }, 2000);
+    }, 1000);
   }
 
   /* ═════════════════════ FLAME LAUNCHER & COMMAND PALETTE ═════════════════════ */
