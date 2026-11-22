@@ -879,32 +879,12 @@ def scan_active_proto_sockets(
             for ip_member in s_ips:
                 session_companion_ips[ip_member] = s_ips
 
-    # Pass 3: Clean blocked-UDP (<=300B) and lone post-disconnect half-open zombie socket (e.g. :5228)
+    # Pass 3: Clean blocked-UDP (<=300B; blackhole outbound returns immediately)
     for sock_key, lport, rport, matched_proto, rx_b, tx_b, age, idle_sec, _, prev in active_rows:
         s_uid = str(prev.get("uid") or "")
         s_ip = str(prev.get("ip") or "")
 
-        comp_ips = session_companion_ips.get(s_ip, {s_ip} if s_ip else set())
-        dev_min_idle = min((ip_min_idle_map.get(c_ip, 9999.0) for c_ip in comp_ips), default=idle_sec)
-        dev_last_io_mono = now_mono - dev_min_idle
-        remaining_dev_sockets = sum(ip_open_tcp_count.get(c_ip, 0) for c_ip in comp_ips)
-
-        dev_close_events = [
-            (t, c_idle)
-            for c_ip in comp_ips
-            for (t, c_idle) in IP_TCP_CLOSE_MONO.get(c_ip, [])
-            if (now_mono - t) <= 2.5 and t >= (dev_last_io_mono - 0.35)
-        ]
-        dev_closed_cnt = len(dev_close_events)
-        has_active_close = any(c_idle <= 8.0 for (_, c_idle) in dev_close_events)
-        is_lone_disconnect_zombie = bool(
-            remaining_dev_sockets == 1
-            and (dev_closed_cnt >= 2 or (dev_closed_cnt == 1 and has_active_close))
-            and dev_min_idle >= 1.2
-            and idle_sec >= 1.2
-        )
-
-        if (tx_b <= 300 and age >= 1.0) or is_lone_disconnect_zombie:
+        if tx_b <= 300 and age >= 1.0:
             try:
                 subprocess.run(
                     ["ss", "-K", "sport", "=", f":{lport}", "dport", "=", f":{rport}"],
@@ -1092,20 +1072,12 @@ def update_vless_user_sessions(
                             matched_sess = s
                             break
 
-            # Rule 3: Single-Phone 4G CGNAT Dual-Gateway Pairing (Initial 1.8s Handshake OR Simultaneous App/YouTube Burst <=1.2s)
+            # Rule 3: Single-Phone 4G CGNAT Companion Pairing (same /16 carrier pool, up to 2 companion IPs)
             if matched_sess is None and ver == 4:
-                ip_acc = u_accept_ts.get(ip, 0.0)
                 for s in sessions.values():
-                    if super_key in s["super_keys"] and len(s["ips"]) < 2:
-                        if (now_ts - float(s["created_at"])) <= 1.8:
-                            matched_sess = s
-                            break
-                        if ip_acc > 0.0 and any(
-                            u_accept_ts.get(ex_ip, 0.0) > 0.0 and abs(ip_acc - u_accept_ts[ex_ip]) <= 1.2
-                            for ex_ip in s["ips"]
-                        ):
-                            matched_sess = s
-                            break
+                    if super_key in s["super_keys"] and len(s["ips"]) < 3:
+                        matched_sess = s
+                        break
 
             if matched_sess is not None:
                 matched_sess["ips"].add(ip)
@@ -1133,14 +1105,14 @@ def update_vless_user_sessions(
                     "last_seen": now_ts,
                 }
 
-        # Consolidate two single-IP sessions on the same /16 CGNAT pool if they later fire a simultaneous app/YouTube burst (<=1.2s)
+        # Consolidate two sessions on the same /16 CGNAT pool
         sids = list(sessions.keys())
         for i_a in range(len(sids)):
             sid_a = sids[i_a]
             if sid_a not in sessions:
                 continue
             s_a = sessions[sid_a]
-            if len(s_a["ips"]) >= 2:
+            if len(s_a["ips"]) >= 3:
                 continue
             for i_b in range(i_a + 1, len(sids)):
                 sid_b = sids[i_b]
@@ -1148,15 +1120,8 @@ def update_vless_user_sessions(
                     continue
                 s_b = sessions[sid_b]
                 if (
-                    len(s_a["ips"]) + len(s_b["ips"]) <= 2
+                    len(s_a["ips"]) + len(s_b["ips"]) <= 3
                     and (s_a["super_keys"] & s_b["super_keys"])
-                    and any(
-                        u_accept_ts.get(ip_a, 0.0) > 0.0
-                        and u_accept_ts.get(ip_b, 0.0) > 0.0
-                        and abs(u_accept_ts[ip_a] - u_accept_ts[ip_b]) <= 1.2
-                        for ip_a in s_a["ips"]
-                        for ip_b in s_b["ips"]
-                    )
                 ):
                     s_a["ips"].update(s_b["ips"])
                     s_a["net_keys"].update(s_b["net_keys"])
@@ -1283,17 +1248,18 @@ def poll_xray_stats_and_ips(
                     continue
 
                 ip_clean, _, is_udp = parse_xray_source_ip(ln)
-                if ip_clean and not is_udp:
+                if ip_clean:
                     u_proto = uuid_to_proto.get(uid, "vless")
-                    accept_events.append(
-                        {
-                            "ts": log_ts,
-                            "proto": u_proto,
-                            "uid": uid,
-                            "ip": ip_clean,
-                            "raw": ln.strip(),
-                        }
-                    )
+                    if not is_udp:
+                        accept_events.append(
+                            {
+                                "ts": log_ts,
+                                "proto": u_proto,
+                                "uid": uid,
+                                "ip": ip_clean,
+                                "raw": ln.strip(),
+                            }
+                        )
                     if not is_trusted_cdn(ip_clean):
                         ip_to_uid[ip_clean] = uid
                         u_acc_map = last_accept_by_uid_ip.setdefault(uid, {})
