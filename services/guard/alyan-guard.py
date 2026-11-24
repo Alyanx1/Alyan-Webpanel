@@ -611,14 +611,19 @@ def enforce_cycle():
 
         if xray_rows and XRAY_BIN.exists():
             now_ts = time.time()
-            has_xray_sockets = False
+            proto_sockets = {"vless": 0, "vmess": 0, "trojan": 0}
             try:
                 ss_chk = subprocess.check_output(
                     ["ss", "-tHn", "state", "established", "( sport = :20001 or sport = :20002 or sport = :20003 or sport = :20004 or sport = :20005 )"],
                     text=True, stderr=subprocess.DEVNULL, timeout=1.0
                 )
-                if ss_chk.strip():
-                    has_xray_sockets = True
+                for ln in ss_chk.splitlines():
+                    if ":20001" in ln or ":20004" in ln or ":20005" in ln:
+                        proto_sockets["vless"] += 1
+                    elif ":20002" in ln:
+                        proto_sockets["vmess"] += 1
+                    elif ":20003" in ln:
+                        proto_sockets["trojan"] += 1
             except Exception:
                 pass
 
@@ -637,20 +642,29 @@ def enforce_cycle():
                                     raw_ip, email = m_acc.group(1), m_acc.group(2).lower()
                                     clean_ip = clean_public_ip(raw_ip)
                                     if clean_ip:
+                                        p_match = "vless"
+                                        if "@" in email:
+                                            p_match = email.split("@", 1)[1]
                                         if email not in XRAY_ACTIVE_SESSIONS:
-                                            XRAY_ACTIVE_SESSIONS[email] = {"ips": set(), "last_seen": now_ts}
-                                        XRAY_ACTIVE_SESSIONS[email]["ips"].add(clean_ip)
+                                            XRAY_ACTIVE_SESSIONS[email] = {
+                                                "proto": p_match,
+                                                "ip_seen": {},
+                                                "last_seen": now_ts,
+                                            }
+                                        XRAY_ACTIVE_SESSIONS[email]["proto"] = p_match
+                                        if "ip_seen" not in XRAY_ACTIVE_SESSIONS[email]:
+                                            XRAY_ACTIVE_SESSIONS[email]["ip_seen"] = {}
+                                        XRAY_ACTIVE_SESSIONS[email]["ip_seen"][clean_ip] = now_ts
                                         XRAY_ACTIVE_SESSIONS[email]["last_seen"] = now_ts
                             XRAY_LAST_LOG_POS = f.tell()
                 except Exception:
                     pass
 
-            if not has_xray_sockets:
-                XRAY_ACTIVE_SESSIONS.clear()
-            else:
-                for email in list(XRAY_ACTIVE_SESSIONS.keys()):
-                    if (now_ts - XRAY_ACTIVE_SESSIONS[email].get("last_seen", 0)) > 12.0:
-                        XRAY_ACTIVE_SESSIONS.pop(email, None)
+            # Fast teardown: If a protocol has 0 established sockets, immediately evict its sessions
+            for email in list(XRAY_ACTIVE_SESSIONS.keys()):
+                p = XRAY_ACTIVE_SESSIONS[email].get("proto", "vless")
+                if proto_sockets.get(p, 0) == 0:
+                    XRAY_ACTIVE_SESSIONS.pop(email, None)
 
             try:
                 sq_out = subprocess.check_output(
@@ -673,6 +687,8 @@ def enforce_cycle():
                     if delta_x > 0:
                         if em in XRAY_ACTIVE_SESSIONS:
                             XRAY_ACTIVE_SESSIONS[em]["last_seen"] = now_ts
+                            for cip in XRAY_ACTIVE_SESSIONS[em].get("ip_seen", {}):
+                                XRAY_ACTIVE_SESSIONS[em]["ip_seen"][cip] = now_ts
                         if "@" in em:
                             x_user, x_proto = em.split("@", 1)
                             conn.execute(
@@ -681,6 +697,15 @@ def enforce_cycle():
                             )
             except Exception:
                 pass
+
+            # Expire individual stale IPs (idle for > 20s) and idle shared sessions (> 20s)
+            for email in list(XRAY_ACTIVE_SESSIONS.keys()):
+                sess = XRAY_ACTIVE_SESSIONS[email]
+                ip_seen = sess.get("ip_seen", {})
+                active_ips_map = {ip: t for ip, t in ip_seen.items() if (now_ts - t) <= 20.0}
+                sess["ip_seen"] = active_ips_map
+                if not active_ips_map or (now_ts - sess.get("last_seen", 0)) > 20.0:
+                    XRAY_ACTIVE_SESSIONS.pop(email, None)
 
             for xr in xray_rows:
                 x_uuid = xr["uuid"]
@@ -692,8 +717,27 @@ def enforce_cycle():
                 x_iplim = int(xr["ip_limit"] or 0)
 
                 sess = XRAY_ACTIVE_SESSIONS.get(x_email, {})
-                active_ips = sorted(sess.get("ips", set()))
-                active_count = len(active_ips)
+                ip_map = sess.get("ip_seen", {})
+                active_ips = sorted(ip_map.keys(), key=lambda k: ip_map[k], reverse=True)
+
+                # Carrier Subnet Clustering:
+                # Group active IPs by /16 for IPv4 and /64 for IPv6.
+                # In cellular CGNAT networks (e.g. Ufone 4G), parallel video/web streams from
+                # a single mobile device frequently route via 2+ IPs in the same /16 carrier pool.
+                cluster_keys = set()
+                for ip_str in active_ips:
+                    try:
+                        ip_obj = ipaddress.ip_address(ip_str)
+                        if ip_obj.version == 4:
+                            net = ipaddress.IPv4Network(f"{ip_str}/16", strict=False)
+                            cluster_keys.add(str(net.network_address))
+                        else:
+                            net = ipaddress.IPv6Network(f"{ip_str}/64", strict=False)
+                            cluster_keys.add(str(net.network_address))
+                    except Exception:
+                        cluster_keys.add(ip_str)
+
+                active_count = len(cluster_keys)
 
                 xray_live[x_uuid] = {"online": active_count if xr["status"] == "active" else 0, "ips": active_ips if xr["status"] == "active" else []}
 

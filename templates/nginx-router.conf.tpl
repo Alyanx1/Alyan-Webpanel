@@ -12,6 +12,7 @@ server {
     server_name {{DOMAIN}} _;
 
     access_log off;
+    reset_timedout_and_closed_connections on;
 
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
@@ -34,6 +35,7 @@ server {
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
+        proxy_ignore_client_abort off;
     }
 
     # ─── Xray VMess WebSocket ────────────────────────────────────────────────
@@ -49,6 +51,7 @@ server {
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
+        proxy_ignore_client_abort off;
     }
 
     # ─── Xray Trojan WebSocket ───────────────────────────────────────────────
@@ -64,6 +67,7 @@ server {
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
         proxy_buffering off;
+        proxy_ignore_client_abort off;
     }
 
     # ─── Xray VLESS XHTTP ────────────────────────────────────────────────────

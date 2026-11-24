@@ -403,6 +403,7 @@
       { name: 'Trojan gRPC TLS (443)', uri: `trojan://${u.uuid}@${d}:443?mode=gun&security=tls&type=grpc&serviceName=alyan-trojan-grpc&sni=${d}#Alyan-${tag}-gRPC` }
     ];
     return [
+      { name: 'VLESS WS Mux TLS (443) [Recommended]', uri: `vless://${u.uuid}@${d}:443?path=%2Falyan-vless&security=tls&encryption=none&host=${d}&type=ws&sni=${d}&mux=1#Alyan-${tag}-WS-MUX` },
       { name: 'VLESS WS TLS (443)', uri: `vless://${u.uuid}@${d}:443?path=%2Falyan-vless&security=tls&encryption=none&host=${d}&type=ws&sni=${d}#Alyan-${tag}-WS-TLS` },
       { name: 'VLESS WS HTTP (80)', uri: `vless://${u.uuid}@${d}:80?path=%2Falyan-vless&security=none&encryption=none&host=${d}&type=ws#Alyan-${tag}-WS-80` },
       { name: 'VLESS XHTTP TLS (443)', uri: `vless://${u.uuid}@${d}:443?path=%2Falyan-xhttp&security=tls&encryption=none&host=${d}&type=xhttp&sni=${d}#Alyan-${tag}-XHTTP` },
@@ -1128,13 +1129,13 @@
 
     const getXrayLiveUsersTotal = () => items
       .filter(u => u.proto === (STATE.xrayProto || 'vless'))
-      .reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (Number(u.online) || (u.ips || []).length || 0)), 0);
+      .reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (u.online != null ? Number(u.online) : (u.ips || []).length)), 0);
     const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === (STATE.xrayProto || 'vless') && (Number(u.online) > 0 || (u.ips && u.ips.length > 0)))
+      .filter(u => u.status !== 'disabled' && u.proto === (STATE.xrayProto || 'vless') && ((u.online != null ? Number(u.online) : 0) > 0 || (u.ips && u.ips.length > 0)))
       .map(u => ({
         user: u.username,
         proto: (u.proto || 'vless').toUpperCase(),
-        online: Number(u.online) || (u.ips || []).length || 0,
+        online: (u.online != null ? Number(u.online) : (u.ips || []).length),
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
@@ -1218,7 +1219,7 @@
           </article>`;
         }
         const ipList = isDis ? [] : (u.ips || []);
-        const onlineCnt = isDis ? 0 : (Number(u.online) || ipList.length || 0);
+        const onlineCnt = isDis ? 0 : (u.online != null ? Number(u.online) : (ipList.length || 0));
         const badgeHtml = isDis
           ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
           : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;

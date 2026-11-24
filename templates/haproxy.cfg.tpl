@@ -31,8 +31,8 @@ defaults
     timeout client  4h
     timeout server  4h
     timeout tunnel  12h
-    timeout client-fin 1s
-    timeout server-fin 1s
+    timeout client-fin 500ms
+    timeout server-fin 500ms
     timeout http-keep-alive 4s
 
 # ─── PUBLIC PORT 80: HTTP / SSH-WS (/alyan) / Xray WS / ACME ─────────────────
