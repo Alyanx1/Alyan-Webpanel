@@ -386,28 +386,6 @@
       `(Owner: ${u.owner || 'admin'})`
     ].join('\n');
   }
-  function buildXrayLinks(u, cfg) {
-    const d = cfg.domain, tag = encodeURIComponent(u.username);
-    if (u.proto === 'vmess') {
-      const mk = (port, tls, net, path) => 'vmess://' + btoa(JSON.stringify({ v: '2', ps: `Alyan-${u.username}-${tls ? 'TLS' : 'NTLS'}-${net.toUpperCase()}`, add: d, port: String(port), id: u.uuid, aid: '0', scy: 'auto', net, type: 'none', host: d, path, tls: tls ? 'tls' : '', sni: tls ? d : '' }));
-      return [
-        { name: 'VMess WS TLS (443)', uri: mk(443, true, 'ws', '/alyan-vmess') },
-        { name: 'VMess WS HTTP (80)', uri: mk(80, false, 'ws', '/alyan-vmess') },
-        { name: 'VMess gRPC TLS (443)', uri: mk(443, true, 'grpc', 'alyan-vmess-grpc') }
-      ];
-    }
-    if (u.proto === 'trojan') return [
-      { name: 'Trojan WS TLS (443)', uri: `trojan://${u.uuid}@${d}:443?path=%2Falyan-trojan&security=tls&host=${d}&type=ws&sni=${d}#Alyan-${tag}-WS-TLS` },
-      { name: 'Trojan TCP TLS (443)', uri: `trojan://${u.uuid}@${d}:443?security=tls&type=tcp&sni=${d}#Alyan-${tag}-TCP` },
-      { name: 'Trojan gRPC TLS (443)', uri: `trojan://${u.uuid}@${d}:443?mode=gun&security=tls&type=grpc&serviceName=alyan-trojan-grpc&sni=${d}#Alyan-${tag}-gRPC` }
-    ];
-    return [
-      { name: 'VLESS WS TLS (443)', uri: `vless://${u.uuid}@${d}:443?path=%2Falyan-vless&security=tls&encryption=none&host=${d}&type=ws&sni=${d}#Alyan-${tag}-WS-TLS` },
-      { name: 'VLESS WS HTTP (80)', uri: `vless://${u.uuid}@${d}:80?path=%2Falyan-vless&security=none&encryption=none&host=${d}&type=ws#Alyan-${tag}-WS-80` },
-      { name: 'VLESS XHTTP TLS (443)', uri: `vless://${u.uuid}@${d}:443?path=%2Falyan-xhttp&security=tls&encryption=none&host=${d}&type=xhttp&sni=${d}#Alyan-${tag}-XHTTP` },
-      { name: 'VLESS gRPC TLS (443)', uri: `vless://${u.uuid}@${d}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=alyan-vless-grpc&sni=${d}#Alyan-${tag}-gRPC` }
-    ];
-  }
 
   /* ─── Demo State (used automatically when /api is offline) ─── */
   const DEMO = {
@@ -433,17 +411,11 @@
       { username: 'Basit', password: '5678', used_bytes: 227960422, gb_limit: 0, ip_limit: 0, online: 0, ips: [], expiry: daysFromNow(29), status: 'active', owner: 'admin' },
       { username: 'ZainGaming', password: '9900', used_bytes: 8412009100, gb_limit: 20, ip_limit: 1, online: 1, ips: ['119.160.64.11'], expiry: daysFromNow(14), status: 'active', owner: 'reseller1' }
     ],
-    xray: [
-      { username: 'AlyanVIP', proto: 'vless', uuid: '6fc812d1-2561-4b9e-9a44-89ef210a44c1', used_bytes: 1868310937, gb_limit: 100, ip_limit: 3, online: 1, ips: ['59.103.100.171'], expiry: daysFromNow(29), status: 'active', owner: 'admin' },
-      { username: 'HamzaStream', proto: 'vmess', uuid: 'a91f44e0-7712-49d1-8112-30bc91a200e8', used_bytes: 5412008960, gb_limit: 0, ip_limit: 2, online: 0, ips: [], expiry: daysFromNow(21), status: 'active', owner: 'admin' },
-      { username: 'TrojanPro', proto: 'trojan', uuid: 'd42e9911-62c0-4a80-b122-9f00bc1120aa', used_bytes: 912001024, gb_limit: 30, ip_limit: 1, online: 1, ips: ['182.185.12.44'], expiry: daysFromNow(10), status: 'active', owner: 'admin' }
-    ],
     services: [
       { id: 'haproxy', name: 'HAProxy Flame Router', desc: 'Public 80 / 443 Multiplexer', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '18.4 MB', pid: 67966 },
-      { id: 'nginx', name: 'Nginx Router & TLS', desc: 'WS / gRPC / Panel HTTPS', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '7.2 MB', pid: 67507 },
+      { id: 'nginx', name: 'Nginx Router & TLS', desc: 'ACME & Panel HTTPS', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '7.2 MB', pid: 67507 },
       { id: 'dropbear', name: 'Dropbear SSH', desc: 'Direct Tunnel Ports 109 / 143', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '1.1 MB', pid: 67060 },
       { id: 'alyan-wsd', name: 'Alyan WS-Proxy', desc: 'GET /alyan 101 + Real-IP Bridge', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '9.8 MB', pid: 67297 },
-      { id: 'xray', name: 'Xray-Core Engine', desc: 'VMess · VLESS · Trojan · XHTTP', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '24.6 MB', pid: 68466 },
       { id: 'alyan-guard', name: 'Alyan Guard', desc: 'GB Quota · Expiry · IP Enforcer', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '11.2 MB', pid: 68115 },
       { id: 'alyan-bot', name: 'Telegram Bot', desc: 'Full User & Server Control', status: 'running', boot: 'enabled', uptime: '2d 11h', mem: '16.5 MB', pid: 69102 },
       { id: 'alyan-panel', name: 'Alyan Webpanel', desc: 'FastAPI Command Deck', status: 'running', boot: 'enabled', uptime: '6d 19h', mem: '28.1 MB', pid: 69447 }
@@ -456,22 +428,18 @@
       { port: 143, addr: '0.0.0.0', proc: 'dropbear', scope: 'public', note: 'Dropbear Direct SSH' },
       { port: 8443, addr: '0.0.0.0', proc: 'nginx', scope: 'public', note: 'Alyan Webpanel HTTPS' },
       { port: 2095, addr: '127.0.0.1', proc: 'alyan-wsd', scope: 'local', note: 'SSH-WS /alyan Bridge' },
-      { port: 8880, addr: '127.0.0.1', proc: 'nginx', scope: 'local', note: 'Xray WS Internal Router' },
-      { port: 8881, addr: '127.0.0.1', proc: 'nginx', scope: 'local', note: 'Xray gRPC / XHTTP h2c' },
-      { port: 10001, addr: '127.0.0.1', proc: 'xray', scope: 'local', note: 'VLESS / VMess / Trojan' },
-      { port: 10085, addr: '127.0.0.1', proc: 'xray', scope: 'local', note: 'Xray Stats gRPC API' },
+      { port: 8880, addr: '127.0.0.1', proc: 'nginx', scope: 'local', note: 'Nginx ACME & Landing' },
       { port: 7700, addr: '127.0.0.1', proc: 'uvicorn', scope: 'local', note: 'Panel FastAPI Core' }
     ],
     admins: [
-      { username: 'admin', role: 'super', max_accounts: 0, scope: 'all', accounts: 5, status: 'active', last_login: 'Just now · 59.103.100.171', created: '2026-10-24' },
+      { username: 'admin', role: 'super', max_accounts: 0, scope: 'all', accounts: 2, status: 'active', last_login: 'Just now · 59.103.100.171', created: '2026-10-24' },
       { username: 'reseller1', role: 'admin', max_accounts: 25, scope: 'own', accounts: 1, status: 'active', last_login: '3h ago · 119.160.64.11', created: '2026-10-27' },
       { username: 'monitor_view', role: 'viewer', max_accounts: 0, scope: 'all', accounts: 0, status: 'active', last_login: '1d ago · 39.42.88.19', created: '2026-10-28' }
     ],
     audit: [
-      { time: '03:54:12', user: 'admin', action: 'xray_links', detail: 'proto=vless user=AlyanVIP', ip: '59.103.100.171' },
       { time: '03:41:08', user: 'admin', action: 'ssh_create', detail: 'user=Alyan days=30 gb=50 ip=2 path=/alyan', ip: '59.103.100.171' },
       { time: '03:28:49', user: 'reseller1', action: 'ssh_create', detail: 'user=ZainGaming days=14 gb=20 ip=1', ip: '119.160.64.11' },
-      { time: '03:15:02', user: 'admin', action: 'stack_repair', detail: 'Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy + Xray tuned', ip: '59.103.100.171' },
+      { time: '03:15:02', user: 'admin', action: 'stack_repair', detail: 'Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy tuned', ip: '59.103.100.171' },
       { time: '02:59:30', user: 'admin', action: 'ssl_issue', detail: 'domain=panel.alyan08.com valid=89d', ip: 'local' }
     ],
     hist: {
@@ -502,11 +470,6 @@
       rx_bps: rx * 1048576 / 8, tx_bps: tx * 1048576 / 8,
       rx_total: 148.6 * 1073741824, tx_total: 139.2 * 1073741824,
       ssh_total: DEMO.ssh.length, ssh_online: DEMO.ssh.reduce((a, u) => a + (u.status === 'disabled' ? 0 : u.online), 0),
-      xray_total: DEMO.xray.length,
-      xray_online: DEMO.xray.reduce((a, u) => a + (u.status === 'disabled' ? 0 : (u.online || 0)), 0),
-      xray_vless: DEMO.xray.filter(u => u.proto === 'vless').length,
-      xray_vmess: DEMO.xray.filter(u => u.proto === 'vmess').length,
-      xray_trojan: DEMO.xray.filter(u => u.proto === 'trojan').length,
       services: DEMO.services, cfg: DEMO.cfg, hist: DEMO.hist
     };
   }
@@ -574,36 +537,6 @@
       logDemo('ssh_delete', `user=${name}`);
       return { ok: true };
     }
-    if (path === '/xray' && (!opts.method || opts.method === 'GET')) return { items: DEMO.xray, cfg: DEMO.cfg };
-    if (path === '/xray' && opts.method === 'POST') {
-      if (DEMO.me.role === 'viewer') throw new Error('Viewer role is read-only');
-      const item = { username: b.username, proto: b.proto || 'vless', uuid: b.uuid || makeUuid(), used_bytes: 0, gb_limit: +b.gb_limit || 0, ip_limit: +b.ip_limit || 0, online: 0, ips: [], expiry: daysFromNow(+b.days || 30), status: 'active', owner: DEMO.me.username };
-      DEMO.xray.unshift(item); logDemo('xray_create', `proto=${item.proto} user=${item.username}`);
-      return { item, cfg: DEMO.cfg };
-    }
-    if (path.startsWith('/xray/') && opts.method === 'PATCH') {
-      const uuid = decodeURIComponent(path.slice(6));
-      const u = DEMO.xray.find(x => x.uuid === uuid);
-      if (!u) throw new Error('Client not found');
-      if (b.username && b.username.trim()) u.username = b.username.trim();
-      if (b.proto) u.proto = b.proto;
-      if (b.new_uuid && b.new_uuid.trim()) u.uuid = b.new_uuid.trim();
-      if (b.days) u.expiry = daysFromNow(+b.days);
-      if (b.gb_limit !== undefined) u.gb_limit = +b.gb_limit;
-      if (b.ip_limit !== undefined) u.ip_limit = +b.ip_limit;
-      if (b.status) {
-        u.status = b.status;
-        if (b.status === 'disabled') { u.online = 0; u.ips = []; }
-      }
-      logDemo(b.status ? `xray_${b.status}` : 'xray_edit', `proto=${u.proto} user=${u.username}`);
-      return { item: u, cfg: DEMO.cfg };
-    }
-    if (path.startsWith('/xray/') && opts.method === 'DELETE') {
-      const uuid = decodeURIComponent(path.slice(6));
-      DEMO.xray = DEMO.xray.filter(x => x.uuid !== uuid);
-      logDemo('xray_delete', `uuid=${uuid.slice(0, 8)}`);
-      return { ok: true };
-    }
     if (path === '/engine') return { services: DEMO.services, ports: DEMO.ports };
     if (path.startsWith('/service/')) {
       const [, , id, act] = path.split('/');
@@ -643,7 +576,7 @@
   }
 
   /* ─── UI Shell & Helpers ─── */
-  const STATE = { bay: 'core', me: null, cfg: null, xrayProto: 'vless', searchSsh: '', searchXray: '', searchAudit: '', timer: null };
+  const STATE = { bay: 'core', me: null, cfg: null, searchSsh: '', searchAudit: '', timer: null };
 
   function toast(msg, kind = 'ok') {
     const el = document.createElement('div');
@@ -727,7 +660,6 @@
     ({
       core: renderCore,
       tunnels: renderTunnels,
-      xray: renderXray,
       engine: renderEngine,
       telemetry: renderTelemetry,
       forge: renderForge,
@@ -805,10 +737,10 @@
               <div class="v">${d.ssh_total} <small>accounts</small></div>
               <div class="s"><span><i class="dot lit"></i> <b>${d.ssh_online}</b> live</span><span>path <b>/alyan</b></span></div>
             </div>
-            <div class="mod kpi" style="cursor:pointer" data-nav="xray">
-              <div class="k">${ic('bolt')} XRAY MATRIX</div>
-              <div class="v">${d.xray_total} <small>clients</small></div>
-              <div class="s"><span><i class="dot lit"></i> <b>${d.xray_online || 0}</b> live</span><span>VLESS <b>${d.xray_vless}</b></span><span>VMess <b>${d.xray_vmess}</b></span><span>Trojan <b>${d.xray_trojan}</b></span></div>
+            <div class="mod kpi" style="cursor:pointer" data-nav="forge">
+              <div class="k">${ic('lock')} SSL &amp; DOMAIN</div>
+              <div class="v">${d.cfg.ssl_days} <small>days valid</small></div>
+              <div class="s"><span><i class="dot lit"></i> <b>${esc(d.cfg.domain)}</b></span></div>
             </div>
             <div class="mod kpi" style="cursor:pointer" data-nav="engine">
               <div class="k">${ic('engine')} FLAME STACK</div>
@@ -1132,285 +1064,14 @@
     };
   }
 
-  /* ═════════════════════ 3. XRAY (6-Corner SVG Hexagon + 2s Real-Time Sync) ═════════════════════ */
-  async function renderXray() {
-    let items = [];
-    let xrayBusy = false;
-    const protos = ['vless', 'vmess', 'trojan'];
-    const isViewer = STATE.me && STATE.me.role === 'viewer';
-
-    const xraySheetHtml = (liveIps) => liveIps.length
-      ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.proto)}</td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
-      : `<div class="empty"><p>No active VLESS, VMess or Trojan sessions right now.</p></div>`;
-
-    const initData = await api('/xray');
-    items = initData.items || [];
-    STATE.cfg = initData.cfg; syncHud();
-
-    const getLiveIps = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto)
-      .flatMap(u => (u.ips || []).map((ip, idx) => ({ user: `${u.username} (S${idx + 1})`, proto: u.proto.toUpperCase(), ip })));
-
-    const getXrayLiveUsersTotal = () => items
-      .filter(u => u.proto === STATE.xrayProto)
-      .reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (Number(u.online) || (u.ips || []).length || 0)), 0);
-    const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (Number(u.online) > 0 || (u.ips && u.ips.length > 0)))
-      .map(u => ({
-        user: u.username,
-        proto: u.proto.toUpperCase(),
-        online: Number(u.online) || (u.ips || []).length || 0,
-        limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
-      }));
-
-    const xrayUsersSheetHtml = (usersList) => usersList.length
-      ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Live Users (Active Sessions)</th><th>User Limit</th></tr></thead><tbody>${usersList.map(r => `<tr><td><b>${esc(r.user)}</b></td><td><b>${esc(r.proto)}</b></td><td><span class="pill lit"><i class="dot lit"></i>${r.online} Active</span></td><td>${r.limit}</td></tr>`).join('')}</tbody></table></div>`
-      : `<div class="empty"><p>No active ${STATE.xrayProto.toUpperCase()} user sessions right now.</p></div>`;
-
-    const syncBayHeader = () => {
-      setBayHead(
-        'XRAY CORE',
-        'Xray',
-        'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
-        isViewer ? '' : `
-         <button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
-         <button class="btn sm" id="btnXrayLiveUsers">${ic('user')}<span id="btnXrayLiveUsersTxt">Live Users (${getXrayLiveUsersTotal()})</span></button>
-         <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
-      );
-      if (!isViewer) {
-        const btnAdd = $('#btnAddXray'); if (btnAdd) btnAdd.onclick = () => openXrayForm(STATE.xrayProto);
-        const btnLive = $('#btnXrayLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
-        const btnXUsers = $('#btnXrayLiveUsers'); if (btnXUsers) btnXUsers.onclick = () => openSheet(`Live Connected ${STATE.xrayProto.toUpperCase()} Users`, 'REAL-TIME ACTIVE SESSIONS · LIVE 2S', `<div id="xrayUsersSheetBody">${xrayUsersSheetHtml(getXrayLiveUsersList())}</div>`);
-      }
-    };
-    syncBayHeader();
-
-    const pIdxInit = protos.indexOf(STATE.xrayProto);
-    $('#view').innerHTML = `
-      <div class="toolbar">
-        <div class="seg" id="xraySeg">
-          <span class="seg-ind" id="xraySegInd" style="left:calc(${pIdxInit * 33.333}% + 4px);width:calc(33.333% - 8px)"></span>
-          ${protos.map(p => `<button type="button" class="${p === STATE.xrayProto ? 'on' : ''}" data-xp="${p}">${p.toUpperCase()}</button>`).join('')}
-        </div>
-        <div class="search">${ic('search')}<input id="xraySearch" placeholder="Search ${STATE.xrayProto.toUpperCase()} client…" value="${esc(STATE.searchXray)}"/></div>
-        <span class="live" id="xrayLiveMeta"><i class="dot lit"></i> 0 clients · live 2s</span>
-      </div>
-      <div id="xrayCardsHost"></div>`;
-
-    const paintXrayCards = () => {
-      const host = $('#xrayCardsHost');
-      if (!host || $('.acc.is-disintegrating', host)) return;
-      const liveIps = getLiveIps();
-      const liveBtnTxt = $('#btnXrayLiveIpsTxt');
-      if (liveBtnTxt) liveBtnTxt.textContent = `Connected IPs (${liveIps.length})`;
-      const liveUsersTxt = $('#btnXrayLiveUsersTxt');
-      if (liveUsersTxt) liveUsersTxt.textContent = `Live Users (${getXrayLiveUsersTotal()})`;
-      const openModalBody = $('#xrayLiveSheetBody');
-      if (openModalBody) openModalBody.innerHTML = xraySheetHtml(liveIps);
-      const openXrayUsersModalBody = $('#xrayUsersSheetBody');
-      if (openXrayUsersModalBody) openXrayUsersModalBody.innerHTML = xrayUsersSheetHtml(getXrayLiveUsersList());
-
-      const protoAll = items.filter(u => u.proto === STATE.xrayProto);
-      const liveMeta = $('#xrayLiveMeta');
-      if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${protoAll.length} clients · live 2s`;
-
-      const list = protoAll.filter(u => u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
-      const renderKey = list.map(u => `${u.uuid}:${u.status}:${u.online}:${u.used_bytes}:${(u.ips||[]).join(',')}`).join('|');
-      if (host._lastRenderKey === renderKey) return;
-      host._lastRenderKey = renderKey;
-
-      host.innerHTML = list.length ? `<div class="cards">${list.map(u => {
-        const isDis = u.status === 'disabled';
-        const pct = u.gb_limit > 0 ? Math.min(100, (u.used_bytes / (u.gb_limit * 1073741824)) * 100) : 100;
-        if (isViewer) {
-          return `
-          <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
-            <div class="acc-top">
-              ${hexAvatar(u.username[0].toUpperCase(), false)}
-              <div>
-                <div class="acc-n">${esc(u.username)}</div>
-                <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · Client</div>
-              </div>
-            </div>
-            <div class="meter">
-              <div class="meter-h"><span>TRAFFIC</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
-              <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
-            </div>
-          </article>`;
-        }
-        const ipList = isDis ? [] : (u.ips || []);
-        const onlineCnt = isDis ? 0 : (Number(u.online) || ipList.length || 0);
-        const badgeHtml = isDis
-          ? `<span class="pill is-disabled"><i class="dot fire"></i>disable</span>`
-          : `<span class="pill ${onlineCnt ? 'lit' : ''}"><i class="dot ${onlineCnt ? 'lit' : ''}"></i>${onlineCnt ? onlineCnt + ' online' : 'offline'}</span>`;
-        const wsPath = `/alyan-${u.proto}`;
-        return `
-        <article class="mod acc ${isDis ? 'acc-disabled' : ''}">
-          <div class="acc-top">
-            ${hexAvatar(u.username[0].toUpperCase(), !isDis && onlineCnt > 0)}
-            <div>
-              <div class="acc-n">${esc(u.username)} ${badgeHtml}</div>
-              <div class="acc-m"><b>${esc(u.proto.toUpperCase())}</b> · cap <b>${u.ip_limit > 0 ? u.ip_limit + ' Users' : 'Unlimited'}</b> · exp <b>${esc(u.expiry)}</b></div>
-              <div class="uuid" data-cpuuid="${esc(u.uuid)}">${esc(u.uuid.slice(0, 18))}… ${ic('copy')}</div>
-            </div>
-          </div>
-          <div class="meter">
-            <div class="meter-h"><span>TRAFFIC</span><b>${fmtBytes(u.used_bytes)} / ${u.gb_limit > 0 ? u.gb_limit + ' GB' : '∞'}</b></div>
-            <div class="bar ${u.gb_limit > 0 ? '' : 'inf'}"><i style="width:${pct.toFixed(1)}%"></i></div>
-          </div>
-          <div class="acc-stats">
-            <div class="st" title="${onlineCnt} Active Users"><span>LIVE USERS</span><b>${onlineCnt}</b></div>
-            <div class="st" title="${esc(wsPath)}"><span>WS PATH</span><b>${esc(wsPath)}</b></div>
-            <div class="st"><span>EXPIRY</span><b>${daysLeft(u.expiry)}d</b></div>
-          </div>
-          <div class="acc-act">
-            <button class="btn sm btn-flame" data-xlinks="${esc(u.uuid)}">${ic('qr')}<span>Links &amp; QR</span></button>
-            <button class="btn sm ${isDis ? 'btn-toggle-on' : 'btn-toggle-off'}" title="${isDis ? 'Enable client' : 'Disable client'}" data-xtoggle="${esc(u.uuid)}" data-dis="${isDis ? '1' : '0'}">${ic(isDis ? 'check' : 'power')}<span>${isDis ? 'Enable' : 'Disable'}</span></button>
-            <button class="icon-btn sm" title="Edit client" data-xedit="${esc(u.uuid)}">${ic('edit')}</button>
-            <button class="icon-btn sm danger" title="Delete" data-xdel="${esc(u.uuid)}">${ic('trash')}</button>
-          </div>
-        </article>`;
-      }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${STATE.xrayProto.toUpperCase()} accounts yet. Click Create above.</p></div>`;
-
-      if (!isViewer) {
-        $$('[data-cpuuid]', host).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
-        $$('[data-xlinks]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xlinks); if (u) showXrayLinks(u); }; });
-        $$('[data-xtoggle]', host).forEach(b => {
-          b.onclick = async () => {
-            const nextStatus = b.dataset.dis === '1' ? 'active' : 'disabled';
-            try {
-              const target = items.find(x => x.uuid === b.dataset.xtoggle);
-              await api(`/xray/${encodeURIComponent(b.dataset.xtoggle)}`, { method: 'PATCH', body: { status: nextStatus } });
-              toast(`${target ? target.username : 'Xray client'} ${nextStatus === 'disabled' ? 'disabled' : 'enabled'}`);
-              const fresh = await api('/xray');
-              items = fresh.items || [];
-              paintXrayCards();
-            } catch (err) { toast(err.message, 'err'); }
-          };
-        });
-        $$('[data-xedit]', host).forEach(b => { b.onclick = () => { const u = items.find(x => x.uuid === b.dataset.xedit); if (u) openXrayForm(u.proto, u); }; });
-        $$('[data-xdel]', host).forEach(b => {
-          b.onclick = async () => {
-            const card = b.closest('.acc');
-            try {
-              await api(`/xray/${encodeURIComponent(b.dataset.xdel)}`, { method: 'DELETE' });
-              toast('Xray client removed');
-              await nanoDisintegrate(card);
-              items = items.filter(x => x.uuid !== b.dataset.xdel);
-              paintXrayCards();
-            } catch (err) { toast(err.message, 'err'); }
-          };
-        });
-      }
-    };
-
-    $$('[data-xp]', $('#xraySeg')).forEach(b => {
-      b.onclick = () => {
-        STATE.xrayProto = b.dataset.xp;
-        const idx = protos.indexOf(STATE.xrayProto);
-        const ind = $('#xraySegInd');
-        if (ind) ind.style.left = `calc(${idx * 33.333}% + 4px)`;
-        $$('[data-xp]', $('#xraySeg')).forEach(x => x.classList.toggle('on', x.dataset.xp === STATE.xrayProto));
-        const inp = $('#xraySearch');
-        if (inp) inp.placeholder = `Search ${STATE.xrayProto.toUpperCase()} client…`;
-        syncBayHeader();
-        paintXrayCards();
-      };
-    });
-    $('#xraySearch').oninput = (e) => { STATE.searchXray = e.target.value; paintXrayCards(); };
-    paintXrayCards();
-
-    STATE.timer = setInterval(async () => {
-      if (STATE.bay !== 'xray' || document.hidden || xrayBusy || $('.acc.is-disintegrating')) return;
-      xrayBusy = true;
-      try {
-        const res = await api('/xray');
-        items = res.items || [];
-        STATE.cfg = res.cfg;
-        paintXrayCards();
-      } catch {} finally { xrayBusy = false; }
-    }, 1000);
-  }
-
-  function showXrayLinks(u) {
-    const links = buildXrayLinks(u, STATE.cfg);
-    openSheet(`${u.username} · ${u.proto.toUpperCase()}`, 'XRAY URIS & QR', `
-      <div class="stack">
-        <div class="qr-box" id="qrTarget">${renderQrSvg(links[0].uri)}</div>
-        <div class="tiny dim center" id="qrCaption">${esc(links[0].name)}</div>
-        ${links.map((l, idx) => `
-          <div class="link-row">
-            <div style="min-width:0"><b>${esc(l.name)}</b><code>${esc(l.uri)}</code></div>
-            <button class="icon-btn sm" title="Show QR" data-qri="${idx}">${ic('qr')}</button>
-            <button class="icon-btn sm" title="Copy URI" data-cpuri="${esc(l.uri)}">${ic('copy')}</button>
-          </div>`).join('')}
-        <button class="btn btn-flame wide" id="cpAllXray">${ic('copy')}<span>Copy All ${links.length} Config Links</span></button>
-      </div>`);
-    $$('[data-qri]', $('#sheet')).forEach(b => {
-      b.onclick = () => { const l = links[+b.dataset.qri]; $('#qrTarget').innerHTML = renderQrSvg(l.uri); $('#qrCaption').textContent = l.name; };
-    });
-    $$('[data-cpuri]', $('#sheet')).forEach(b => { b.onclick = () => copyText(b.dataset.cpuri, 'Config URI copied'); });
-    $('#cpAllXray').onclick = () => copyText(links.map(l => l.uri).join('\n'), 'All Xray links copied');
-  }
-
-  function openXrayForm(proto = 'vless', existing = null) {
-    if (STATE.me && STATE.me.role === 'viewer') return;
-    const curProto = existing ? existing.proto : proto;
-    openSheet(existing ? `Edit ${existing.username} (${curProto.toUpperCase()})` : `Create ${curProto.toUpperCase()} Client`, existing ? 'EDIT XRAY CLIENT' : 'XRAY HOT-PROVISION', `
-      <form class="stack" id="xrayForm" autocomplete="off">
-        <div class="row2">
-          <label class="field"><span>Username</span><input name="username" required pattern="[A-Za-z0-9_-]{1,31}" value="${existing ? esc(existing.username) : ''}" placeholder="Enter username" autocomplete="off"/></label>
-          <label class="field"><span>Protocol</span>
-            <select name="proto">
-              <option value="vless" ${curProto==='vless'?'selected':''}>VLESS</option>
-              <option value="vmess" ${curProto==='vmess'?'selected':''}>VMess</option>
-              <option value="trojan" ${curProto==='trojan'?'selected':''}>Trojan</option>
-            </select>
-          </label>
-        </div>
-        ${existing ? `<label class="field"><span>UUID / Trojan Key</span><input name="new_uuid" required class="mono" value="${esc(existing.uuid)}"/></label>` : ''}
-        <div class="row3">
-          <label class="field"><span>Days</span><div class="stepper"><button type="button">−</button><input name="days" type="number" min="1" value="${existing ? Math.max(1, daysLeft(existing.expiry)) : 30}" data-step="5"/><button type="button">+</button></div></label>
-          <label class="field"><span>GB (0=∞)</span><div class="stepper"><button type="button">−</button><input name="gb_limit" type="number" min="0" value="${existing ? existing.gb_limit : 0}" data-step="10"/><button type="button">+</button></div></label>
-          <label class="field"><span>User Limit (0=∞)</span><div class="stepper"><button type="button">−</button><input name="ip_limit" type="number" min="0" value="${existing ? existing.ip_limit : 2}" data-step="1"/><button type="button">+</button></div></label>
-        </div>
-        <div class="foot">
-          <button type="button" class="btn" id="xCancel">Cancel</button>
-          <button type="submit" class="btn btn-flame">${existing ? 'Save Changes' : 'Create Client'}</button>
-        </div>
-      </form>`);
-    bindSteppers($('#sheet'));
-    $('#xCancel').onclick = closeSheet;
-    $('#xrayForm').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = Object.fromEntries(new FormData(e.target).entries());
-      try {
-        if (existing) {
-          const r = await api(`/xray/${encodeURIComponent(existing.uuid)}`, { method: 'PATCH', body: fd });
-          STATE.xrayProto = r.item.proto;
-          toast(`Updated ${r.item.username}`);
-          closeSheet();
-          renderXray();
-        } else {
-          const r = await api('/xray', { method: 'POST', body: fd });
-          STATE.xrayProto = r.item.proto;
-          toast(`Created ${r.item.username}`);
-          renderXray();
-          showXrayLinks(r.item);
-        }
-      } catch (err) { toast(err.message, 'err'); }
-    };
-  }
-
-
-  /* ═════════════════════ 4. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
+  /* ═════════════════════ 3. ENGINE (Services & Listening Ports · 2s Sync) ═════════════════════ */
   async function renderEngine() {
     let engBusy = false;
     const isViewer = STATE.me && STATE.me.role === 'viewer';
     setBayHead(
       'DAEMONS & PORTS',
       'Engine',
-      'HAProxy · Nginx · Dropbear · WS-Proxy · Xray · Alyan Guard · Bot · Panel',
+      'HAProxy · Nginx · Dropbear · WS-Proxy · Alyan Guard · Bot · Panel',
       isViewer ? '' : `
        <button class="btn sm" id="btnRefreshEng">${ic('refresh')}<span>Refresh</span></button>
        <button class="btn btn-flame sm" id="btnRestartAll">${ic('bolt')}<span>Restart Full Stack</span></button>`
@@ -1557,7 +1218,7 @@
             <div class="st-res" style="margin-bottom:14px">
               <div class="st"><span>DOWNLOAD RATE</span><b>↓ ${fmtRate(d.rx_bps)}</b></div>
               <div class="st"><span>UPLOAD RATE</span><b>↑ ${fmtRate(d.tx_bps)}</b></div>
-              <div class="st"><span>LIVE TUNNELS</span><b>${(d.ssh_online || 0) + (d.xray_online || 0)} online</b></div>
+              <div class="st"><span>LIVE TUNNELS</span><b>${d.ssh_online || 0} online</b></div>
             </div>
             <svg viewBox="0 0 460 118" preserveAspectRatio="none" class="spark">
               <defs>
@@ -1620,7 +1281,7 @@
               <label class="field"><span>Custom Tunnel Domain</span><input name="domain" required value="${esc(cfg.domain)}" ${isViewer ? 'readonly disabled' : ''}/></label>
               <label class="field"><span>Web Panel HTTPS Port</span><input name="panel_port" type="number" min="1024" max="65535" required value="${cfg.panel_port}" ${isViewer ? 'readonly disabled' : ''}/></label>
             </div>
-            <p class="note">Changing domain automatically issues a fresh Let's Encrypt EC-256 certificate, rebuilds the HAProxy PEM bundle, and reloads Nginx + Xray without dropping active sessions.</p>
+            <p class="note">Changing domain automatically issues a fresh Let's Encrypt EC-256 certificate, rebuilds the HAProxy PEM bundle, and reloads Nginx without dropping active sessions.</p>
             ${isViewer ? '' : `
             <div class="chips">
               <button type="submit" class="btn btn-flame sm">${ic('check')}<span>Apply Domain &amp; Port</span></button>
@@ -1639,7 +1300,7 @@
               <label class="field"><span>New Password</span><input name="new_password" type="password" minlength="6" placeholder="Enter new password (blank = keep)" autocomplete="new-password"/></label>
               <label class="field"><span>Confirm Password</span><input name="confirm_password" type="password" minlength="6" placeholder="Confirm password" autocomplete="new-password"/></label>
             </div>
-            <p class="note">One-click Stack Repair re-applies unthrottled Kernel BBR + FQ pacing, clears any NIC traffic shapers, and syncs HAProxy, Nginx, Dropbear &amp; Xray.</p>
+            <p class="note">One-click Stack Repair re-applies unthrottled Kernel BBR + FQ pacing, clears any NIC traffic shapers, and syncs HAProxy, Nginx &amp; Dropbear.</p>
             <div class="chips">
               <button type="submit" class="btn btn-flame sm">${ic('lock')}<span>Save Credentials</span></button>
               <button type="button" class="btn sm" id="btnFixStack">${ic('refresh')}<span>Fix &amp; Optimize Stack</span></button>
@@ -1710,7 +1371,7 @@
       $('#btnFixStack').onclick = async () => {
         await api('/settings', { method: 'POST', body: { maint: 'fix_ws_ssl_stack' } });
         await api('/service/all/restart', { method: 'POST' });
-        toast('Wire-Speed BBR+FQ + SSH-WS + SSL + Xray stack optimized & restarted');
+        toast('Wire-Speed BBR+FQ + SSH-WS + SSL stack optimized & restarted');
       };
     }
   }
@@ -1822,7 +1483,7 @@
     setBayHead(
       'REMOTE TELEGRAM ENGINE',
       'Telegram',
-      'Create, renew & delete SSH / Xray accounts, check server load & receive alerts directly in Telegram'
+      'Create, renew & delete SSH accounts, check server load & receive alerts directly in Telegram'
     );
 
     $('#view').innerHTML = `
@@ -1857,11 +1518,9 @@
             <div><code>/addssh</code><span>Interactive wizard: username, password, days, GB &amp; IP limit + /alyan payload</span></div>
             <div><code>/delssh</code><span>Delete or lock an SSH account immediately</span></div>
             <div><code>/renewssh</code><span>Extend expiry days or reset data quota</span></div>
-            <div><code>/addxray</code><span>Create VLESS / VMess / Trojan client + QR image</span></div>
-            <div><code>/delxray</code><span>Remove Xray client cleanly without restart</span></div>
-            <div><code>/users</code><span>List all accounts with live online IP counts</span></div>
+            <div><code>/users</code><span>List all SSH accounts with live online IP counts</span></div>
             <div><code>/status</code><span>Live CPU, RAM, bandwidth, SSL &amp; daemon health</span></div>
-            <div><code>/restart</code><span>Restart HAProxy, Nginx, Xray, Dropbear or WS-Proxy</span></div>
+            <div><code>/restart</code><span>Restart HAProxy, Nginx, Dropbear or WS-Proxy</span></div>
           </div>
         </section>
       </div>`;
@@ -1884,7 +1543,7 @@
     };
   }
 
-  /* ═════════════════════ 9. LIST (Activity & Event List · 2s Sync) ═════════════════════ */
+  /* ═════════════════════ 8. LIST (Activity & Event List · 2s Sync) ═════════════════════ */
   async function renderAudit() {
     let items = (await api('/audit')).items || [];
     let auditBusy = false;
@@ -1910,7 +1569,7 @@
       if (meta) meta.innerHTML = `<i class="dot lit"></i> ${list.length} records · live 2s`;
       host.innerHTML = list.length ? list.map(a => `
         <div class="log-item">
-          <div class="log-ic">${ic(a.action.includes('xray') ? 'bolt' : a.action.includes('ssh') ? 'tunnel' : 'list')}</div>
+          <div class="log-ic">${ic(a.action.includes('ssh') ? 'tunnel' : 'list')}</div>
           <div class="log-t"><b>${esc(a.action)}</b> &nbsp;<span>${esc(a.detail)}</span></div>
           <div class="log-r"><div>${esc(a.user)} · ${esc(a.ip)}</div><div>${esc(a.time)}</div></div>
         </div>`).join('') : `<div class="empty"><p>No matching entries in list.</p></div>`;
@@ -1936,16 +1595,16 @@
     openSheet('Flame Launcher', 'QUICK PROVISION', `
       <div class="qc-grid">
         <button class="qc" data-qa="ssh">${ic('tunnel')}<b>New SSH Account</b><span>Direct · SSL · WS /alyan</span></button>
-        <button class="qc" data-qa="vless">${ic('bolt')}<b>New VLESS Client</b><span>WS · gRPC · XHTTP on 443</span></button>
-        <button class="qc" data-qa="vmess">${ic('bolt')}<b>New VMess Client</b><span>TLS 443 &amp; HTTP 80</span></button>
-        <button class="qc" data-qa="trojan">${ic('lock')}<b>New Trojan Client</b><span>TLS 443 WS · TCP · gRPC</span></button>
+        <button class="qc" data-qa="engine">${ic('engine')}<b>System Daemons</b><span>HAProxy · Nginx · Dropbear · WS</span></button>
+        <button class="qc" data-qa="forge">${ic('sliders')}<b>Domain &amp; SSL</b><span>Custom Domain · Port · Banner</span></button>
+        <button class="qc" data-qa="admins">${ic('shield')}<b>Manage Admins</b><span>Super Admin · Reseller · Viewer</span></button>
       </div>`);
     $$('[data-qa]', $('#sheet')).forEach(b => {
       b.onclick = () => {
         const qa = b.dataset.qa;
         closeSheet();
         if (qa === 'ssh') { go('tunnels'); setTimeout(() => openSshForm(), 40); }
-        else { STATE.xrayProto = qa; go('xray'); setTimeout(() => openXrayForm(qa), 40); }
+        else { go(qa); }
       };
     });
   }
@@ -1956,13 +1615,9 @@
     const cmds = [
       { label: 'Go to Core', icon: 'core', run: () => go('core'), key: 'G C' },
       ...(isViewer ? [] : [
-        { label: 'Create SSH Account (/alyan)', icon: 'plus', run: () => { go('tunnels'); setTimeout(() => openSshForm(), 40); }, key: 'N S' },
-        { label: 'Create VLESS Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vless'; go('xray'); setTimeout(() => openXrayForm('vless'), 40); }, key: 'N V' },
-        { label: 'Create VMess Client', icon: 'bolt', run: () => { STATE.xrayProto = 'vmess'; go('xray'); setTimeout(() => openXrayForm('vmess'), 40); }, key: 'N M' },
-        { label: 'Create Trojan Client', icon: 'lock', run: () => { STATE.xrayProto = 'trojan'; go('xray'); setTimeout(() => openXrayForm('trojan'), 40); }, key: 'N T' }
+        { label: 'Create SSH Account (/alyan)', icon: 'plus', run: () => { go('tunnels'); setTimeout(() => openSshForm(), 40); }, key: 'N S' }
       ]),
       { label: 'Open SSH Accounts', icon: 'tunnel', run: () => go('tunnels') },
-      { label: 'Open Xray', icon: 'bolt', run: () => go('xray') },
       { label: 'Open Engine (Services & Ports)', icon: 'engine', run: () => go('engine') },
       { label: 'Open VPS Info', icon: 'chart', run: () => go('telemetry') },
       { label: 'Open Settings', icon: 'sliders', run: () => go('forge') },

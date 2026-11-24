@@ -48,10 +48,9 @@ RESERVED_USERS = {
 
 MANAGED_SERVICES = [
     ("haproxy",     "HAProxy Flame Router", "Public 80 / 443 Multiplexer"),
-    ("nginx",       "Nginx Router & TLS",   "WS / gRPC / Panel HTTPS"),
+    ("nginx",       "Nginx Router & TLS",   "ACME & Panel HTTPS"),
     ("dropbear",    "Dropbear SSH",         "Direct Tunnel Ports 109 / 143"),
     ("alyan-wsd",   "Alyan WS-Proxy",       "GET /alyan 101 + Real-IP Bridge"),
-    ("xray",        "Xray-Core Engine",     "VMess · VLESS · Trojan · XHTTP"),
     ("alyan-guard", "Alyan Guard",          "GB Quota · Expiry · IP Enforcer"),
     ("alyan-bot",   "Telegram Bot",         "Full User & Server Control"),
     ("alyan-panel", "Alyan Webpanel",       "FastAPI Command Deck"),
@@ -110,18 +109,7 @@ def get_db() -> sqlite3.Connection:
             owner      TEXT NOT NULL DEFAULT 'admin',
             created    TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS xray_users (
-            uuid       TEXT PRIMARY KEY,
-            username   TEXT NOT NULL,
-            proto      TEXT NOT NULL,
-            used_bytes INTEGER NOT NULL DEFAULT 0,
-            gb_limit   REAL NOT NULL DEFAULT 0,
-            ip_limit   INTEGER NOT NULL DEFAULT 0,
-            expiry     TEXT NOT NULL,
-            status     TEXT NOT NULL DEFAULT 'active',
-            owner      TEXT NOT NULL DEFAULT 'admin',
-            created    TEXT NOT NULL
-        );
+        DROP TABLE IF EXISTS xray_users;
         CREATE TABLE IF NOT EXISTS audit_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
@@ -371,56 +359,6 @@ def configure_dropbear_and_banner(banner_text: str):
             subprocess.run(["systemctl", "reload", "sshd"], stderr=subprocess.DEVNULL)
 
 
-def sync_xray_config(conn: sqlite3.Connection, reload_service: bool = True):
-    tpl_path = TPL_DIR / "xray-config.json.tpl"
-    if not tpl_path.exists():
-        return
-    rows = conn.execute("SELECT * FROM xray_users WHERE status = 'active'").fetchall()
-    vless_c, vmess_c, trojan_c = [], [], []
-    for r in rows:
-        email = f"{r['username']}.{r['proto']}@alyan"
-        if r["proto"] == "vless":
-            vless_c.append({"id": r["uuid"], "email": email, "level": 0})
-        elif r["proto"] == "vmess":
-            vmess_c.append({"id": r["uuid"], "alterId": 0, "email": email, "level": 0})
-        elif r["proto"] == "trojan":
-            trojan_c.append({"password": r["uuid"], "email": email, "level": 0})
-
-    rendered = (
-        tpl_path.read_text(encoding="utf-8")
-        .replace("{{VLESS_CLIENTS}}", json.dumps(vless_c))
-        .replace("{{VMESS_CLIENTS}}", json.dumps(vmess_c))
-        .replace("{{TROJAN_CLIENTS}}", json.dumps(trojan_c))
-    )
-    out_dir = Path("/usr/local/etc/xray")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    Path("/var/log/xray").mkdir(parents=True, exist_ok=True)
-
-    xray_bin = Path("/usr/local/bin/xray")
-    tmp_cfg = out_dir / ".config.test.json"
-    if xray_bin.exists():
-        tmp_cfg.write_text(rendered, encoding="utf-8")
-        chk = subprocess.run(
-            [str(xray_bin), "run", "-test", "-config", str(tmp_cfg)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if chk.returncode != 0 and "trustedXForwardedFor" in rendered:
-            try:
-                cfg_obj = json.loads(rendered)
-                for inb in cfg_obj.get("inbounds", []):
-                    so = inb.get("streamSettings", {}).get("sockopt", {})
-                    so.pop("trustedXForwardedFor", None)
-                rendered = json.dumps(cfg_obj, indent=2)
-            except Exception:
-                pass
-        tmp_cfg.unlink(missing_ok=True)
-
-    (out_dir / "config.json").write_text(rendered, encoding="utf-8")
-    if reload_service:
-        subprocess.run(["systemctl", "restart", "xray"], stderr=subprocess.DEVNULL)
-
-
 def render_all_configs(conn: sqlite3.Connection, reload_daemons: bool = False):
     domain = get_setting(conn, "domain", "localhost")
     panel_port = get_setting(conn, "panel_port", "8443")
@@ -472,8 +410,6 @@ def render_all_configs(conn: sqlite3.Connection, reload_daemons: bool = False):
             .replace("{{PANEL_PORT}}", str(panel_port)),
             encoding="utf-8",
         )
-
-    sync_xray_config(conn, reload_service=reload_daemons)
 
     if reload_daemons:
         subprocess.run(["systemctl", "daemon-reload"], stderr=subprocess.DEVNULL)
@@ -598,8 +534,7 @@ def check_write_permission(conn: sqlite3.Connection, actor_info: dict, creating:
         if max_acc > 0:
             owner = actor_info["username"]
             c_ssh = conn.execute("SELECT COUNT(*) AS c FROM ssh_users WHERE owner = ?", (owner,)).fetchone()["c"]
-            c_xry = conn.execute("SELECT COUNT(*) AS c FROM xray_users WHERE owner = ?", (owner,)).fetchone()["c"]
-            if (c_ssh + c_xry) >= max_acc:
+            if c_ssh >= max_acc:
                 raise PermissionError(f"Reseller quota reached ({max_acc} accounts maximum)")
 
 
@@ -774,22 +709,13 @@ def collect_listening_ports(panel_port: int = 8443) -> list[dict]:
         80: "HTTP · ACME · WS /alyan",
         109: "Dropbear + WS Target",
         143: "Dropbear Direct Tunnel",
-        443: "TLS Multiplexer (SSH/WS/Xray)",
+        443: "TLS Multiplexer (SSH/WS)",
         panel_port: "Alyan Webpanel HTTPS",
         2095: "Alyan WS-Proxy (/alyan)",
         4443: "HAProxy TLS Offload",
         7700: "FastAPI Uvicorn Core",
-        8880: "Nginx WS & XHTTP Router",
-        8881: "Nginx gRPC h2c Router",
-        10001: "Xray VLESS WS",
-        10002: "Xray VMess WS",
-        10003: "Xray Trojan WS",
-        10011: "Xray VLESS gRPC",
-        10012: "Xray VMess gRPC",
-        10013: "Xray Trojan gRPC",
-        10023: "Xray Trojan TCP",
-        10031: "Xray VLESS XHTTP",
-        10085: "Xray Stats API",
+        8880: "Nginx ACME & Landing Router",
+        8884: "Nginx Edge Landing",
     }
     seen: dict[tuple[int, str], dict] = {}
     try:
@@ -831,18 +757,11 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
     cfg = build_cfg_dict(conn)
 
     ssh_rows = [r for r in conn.execute("SELECT username, owner, status FROM ssh_users").fetchall() if can_access_owner(actor_info, r["owner"])]
-    xray_rows = [r for r in conn.execute("SELECT uuid, proto, owner, status FROM xray_users").fetchall() if can_access_owner(actor_info, r["owner"])]
 
     ssh_live = snap.get("ssh_live", {})
     ssh_online = sum(
         int(ssh_live.get(r["username"], {}).get("online", 0))
         for r in ssh_rows
-        if r["status"] == "active"
-    )
-    xray_live = snap.get("xray_live", {})
-    xray_online = sum(
-        int(xray_live.get(r["uuid"], {}).get("online", 0))
-        for r in xray_rows
         if r["status"] == "active"
     )
 
@@ -874,11 +793,6 @@ def build_overview_payload(conn: sqlite3.Connection, actor_info: dict) -> dict:
         "tx_total": int(snap.get("tx_total", inst["tx_total"])),
         "ssh_total": len(ssh_rows),
         "ssh_online": ssh_online,
-        "xray_total": len(xray_rows),
-        "xray_online": xray_online,
-        "xray_vless": sum(1 for r in xray_rows if r["proto"] == "vless"),
-        "xray_vmess": sum(1 for r in xray_rows if r["proto"] == "vmess"),
-        "xray_trojan": sum(1 for r in xray_rows if r["proto"] == "trojan"),
         "services": svcs,
         "cfg": cfg,
         "hist": hist,
@@ -914,7 +828,7 @@ def service_action(conn: sqlite3.Connection, actor_info: dict, svc_id: str, acti
 
     if svc_id == "all":
         bot_cfg = json.loads(get_setting(conn, "bot_json", "{}"))
-        stack = ["dropbear", "alyan-wsd", "xray", "nginx", "haproxy", "alyan-guard"]
+        stack = ["dropbear", "alyan-wsd", "nginx", "haproxy", "alyan-guard"]
         if bot_cfg.get("enabled"):
             stack.append("alyan-bot")
         for s in stack:
@@ -1128,137 +1042,8 @@ def ssh_del(conn: sqlite3.Connection, actor_info: dict, username: str, ip: str =
     return {"ok": True}
 
 
-# ─── Xray Client Management (VLESS · VMess · Trojan) ─────────────────────────
-def format_xray_row(row: sqlite3.Row, xray_live: dict, is_viewer: bool = False) -> dict:
-    live = xray_live.get(row["uuid"], {})
-    is_dis = row["status"] == "disabled"
-    return {
-        "username": row["username"],
-        "proto": row["proto"],
-        "uuid": "••••••••-••••-••••-••••-••••••••••••" if is_viewer else row["uuid"],
-        "used_bytes": int(row["used_bytes"]),
-        "gb_limit": float(row["gb_limit"]),
-        "ip_limit": 0 if is_viewer else int(row["ip_limit"]),
-        "online": 0 if (is_dis or is_viewer) else int(live.get("online", 0)),
-        "ips": [] if (is_dis or is_viewer) else list(live.get("ips", [])),
-        "expiry": row["expiry"],
-        "status": row["status"],
-        "owner": row["owner"],
-    }
-
-
-def xray_list(conn: sqlite3.Connection, actor_info: dict) -> dict:
-    snap = read_live_snapshot()
-    xray_live = snap.get("xray_live", {})
-    is_viewer = actor_info.get("role") == "viewer"
-    rows = conn.execute("SELECT * FROM xray_users ORDER BY rowid DESC").fetchall()
-    items = [format_xray_row(r, xray_live, is_viewer) for r in rows if can_access_owner(actor_info, r["owner"])]
-    return {"items": items, "cfg": build_cfg_dict(conn)}
-
-
-def xray_add(
-    conn: sqlite3.Connection,
-    actor_info: dict,
-    username: str,
-    proto: str = "vless",
-    days: int = 30,
-    gb_limit: float = 0.0,
-    ip_limit: int = 2,
-    custom_uuid: str = "",
-    ip: str = "local",
-) -> dict:
-    check_write_permission(conn, actor_info, creating=True)
-    u = validate_username(username)
-    p = (proto or "vless").lower().strip()
-    if p not in ("vless", "vmess", "trojan"):
-        raise ValueError("Protocol must be vless, vmess, or trojan")
-
-    uid = (custom_uuid or "").strip() or str(uuid_mod.uuid4())
-    if conn.execute("SELECT 1 FROM xray_users WHERE uuid = ?", (uid,)).fetchone():
-        raise ValueError("UUID / key already exists")
-    if conn.execute("SELECT 1 FROM xray_users WHERE LOWER(username) = LOWER(?) AND proto = ?", (u, p)).fetchone():
-        raise ValueError(f"{p.upper()} client '{u}' already exists")
-
-    exp_date = (dt.date.today() + dt.timedelta(days=max(1, int(days)))).isoformat()
-    today = dt.date.today().isoformat()
-    owner = actor_info["username"]
-    conn.execute(
-        """
-        INSERT INTO xray_users (uuid, username, proto, used_bytes, gb_limit, ip_limit, expiry, status, owner, created)
-        VALUES (?, ?, ?, 0, ?, ?, ?, 'active', ?, ?)
-        """,
-        (uid, u, p, max(0.0, float(gb_limit)), max(0, int(ip_limit)), exp_date, owner, today),
-    )
-    add_audit(conn, owner, "xray_create", f"proto={p} user={u}", ip)
-    conn.commit()
-    sync_xray_config(conn, reload_service=True)
-
-    row = conn.execute("SELECT * FROM xray_users WHERE uuid = ?", (uid,)).fetchone()
-    return {"item": format_xray_row(row, {}), "cfg": build_cfg_dict(conn)}
-
-
-def xray_edit(conn: sqlite3.Connection, actor_info: dict, uuid_key: str, payload: dict, ip: str = "local") -> dict:
-    check_write_permission(conn, actor_info, creating=False)
-    row = conn.execute("SELECT * FROM xray_users WHERE uuid = ?", (uuid_key,)).fetchone()
-    if not row:
-        raise ValueError("Xray client not found")
-    if not can_access_owner(actor_info, row["owner"]):
-        raise PermissionError("Access denied to this Xray client")
-
-    new_u = validate_username(payload["username"]) if payload.get("username") else row["username"]
-    new_p = str(payload.get("proto") or row["proto"]).lower().strip()
-    if new_p not in ("vless", "vmess", "trojan"):
-        raise ValueError("Protocol must be vless, vmess, or trojan")
-
-    new_uid = str(payload.get("new_uuid") or uuid_key).strip() or uuid_key
-    if new_uid != uuid_key:
-        if conn.execute("SELECT 1 FROM xray_users WHERE uuid = ?", (new_uid,)).fetchone():
-            raise ValueError("Target UUID / key is already in use")
-
-    expiry = row["expiry"]
-    if payload.get("days") not in (None, ""):
-        expiry = (dt.date.today() + dt.timedelta(days=max(1, int(float(payload["days"]))))).isoformat()
-
-    gb_lim = float(payload["gb_limit"]) if payload.get("gb_limit") not in (None, "") else float(row["gb_limit"])
-    ip_lim = int(float(payload["ip_limit"])) if payload.get("ip_limit") not in (None, "") else int(row["ip_limit"])
-    used_b = 0 if payload.get("reset_quota") else int(row["used_bytes"])
-    status = payload["status"] if payload.get("status") in ("active", "disabled") else row["status"]
-
-    conn.execute(
-        """
-        UPDATE xray_users
-           SET uuid = ?, username = ?, proto = ?, used_bytes = ?, gb_limit = ?, ip_limit = ?, expiry = ?, status = ?
-         WHERE uuid = ?
-        """,
-        (new_uid, new_u, new_p, used_b, max(0.0, gb_lim), max(0, ip_lim), expiry, status, uuid_key),
-    )
-    act_tag = f"xray_{status}" if payload.get("status") else "xray_edit"
-    add_audit(conn, actor_info["username"], act_tag, f"proto={new_p} user={new_u}", ip)
-    conn.commit()
-    sync_xray_config(conn, reload_service=True)
-
-    snap = read_live_snapshot()
-    updated = conn.execute("SELECT * FROM xray_users WHERE uuid = ?", (new_uid,)).fetchone()
-    return {"item": format_xray_row(updated, snap.get("xray_live", {})), "cfg": build_cfg_dict(conn)}
-
-
-def xray_del(conn: sqlite3.Connection, actor_info: dict, uuid_key: str, ip: str = "local") -> dict:
-    check_write_permission(conn, actor_info, creating=False)
-    row = conn.execute("SELECT * FROM xray_users WHERE uuid = ?", (uuid_key,)).fetchone()
-    if not row:
-        raise ValueError("Xray client not found")
-    if not can_access_owner(actor_info, row["owner"]):
-        raise PermissionError("Access denied to this Xray client")
-
-    conn.execute("DELETE FROM xray_users WHERE uuid = ?", (uuid_key,))
-    add_audit(conn, actor_info["username"], "xray_delete", f"user={row['username']} uuid={uuid_key[:8]}", ip)
-    conn.commit()
-    sync_xray_config(conn, reload_service=True)
-    return {"ok": True}
-
-
 # ─── System Settings, Bot, Wire-Speed Stack Repair & Init ────────────────────
-RESERVED_INTERNAL_PORTS = {22, 80, 109, 143, 443, 2095, 4443, 7700, 8880, 8881, 10001, 10002, 10003, 10011, 10012, 10013, 10023, 10031, 10085}
+RESERVED_INTERNAL_PORTS = {22, 80, 109, 143, 443, 2095, 4443, 7700, 8880, 8884}
 
 
 def ensure_self_signed_ssl(domain: str):
@@ -1315,7 +1100,6 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
                     raise ValueError(f"Admin username '{new_u}' already exists")
                 conn.execute("UPDATE admins SET username = ? WHERE username = ?", (new_u, target_admin))
                 conn.execute("UPDATE ssh_users SET owner = ? WHERE owner = ?", (new_u, target_admin))
-                conn.execute("UPDATE xray_users SET owner = ? WHERE owner = ?", (new_u, target_admin))
                 conn.execute("UPDATE audit_log SET actor = ? WHERE actor = ?", (new_u, target_admin))
                 add_audit(conn, uname, "username_change", f"old={target_admin} new={new_u}", ip)
                 actual_user = new_u
@@ -1386,7 +1170,7 @@ def apply_settings(conn: sqlite3.Connection, actor_info: dict, payload: dict, ip
         conn.execute("DELETE FROM settings WHERE key IN ('qos_json', 'speedtest_json')")
         ensure_self_signed_ssl(get_setting(conn, "domain", "localhost"))
         render_all_configs(conn, reload_daemons=True)
-        add_audit(conn, uname, "stack_repair", "Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy + Nginx + Xray tuned", ip)
+        add_audit(conn, uname, "stack_repair", "Wire-Speed BBR+FQ + SSH-WS + SSL + HAProxy + Nginx tuned", ip)
         need_render = False
 
     conn.commit()
@@ -1547,14 +1331,13 @@ def admin_list(conn: sqlite3.Connection, actor_info: dict) -> dict:
             continue
         uname = r["username"]
         c_ssh = conn.execute("SELECT COUNT(*) AS c FROM ssh_users WHERE owner = ?", (uname,)).fetchone()["c"]
-        c_xry = conn.execute("SELECT COUNT(*) AS c FROM xray_users WHERE owner = ?", (uname,)).fetchone()["c"]
         items.append(
             {
                 "username": uname,
                 "role": r["role"],
                 "max_accounts": int(r["max_accounts"]),
                 "scope": r["scope"],
-                "accounts": int(c_ssh + c_xry),
+                "accounts": int(c_ssh),
                 "status": r["status"],
                 "last_login": r["last_login"],
                 "created": r["created"],
@@ -1656,7 +1439,6 @@ def main():
     sub.add_parser("overview")
     sub.add_parser("telemetry")
     sub.add_parser("engine")
-    sub.add_parser("xray-sync")
     sub.add_parser("tg-test")
     sub.add_parser("bot-config")
 
@@ -1678,22 +1460,6 @@ def main():
 
     p_sdel = sub.add_parser("ssh-del")
     p_sdel.add_argument("--username", required=True)
-
-    sub.add_parser("xray-list")
-    p_xadd = sub.add_parser("xray-add")
-    p_xadd.add_argument("--username", required=True)
-    p_xadd.add_argument("--proto", default="vless")
-    p_xadd.add_argument("--days", type=int, default=30)
-    p_xadd.add_argument("--gb-limit", type=float, default=0.0)
-    p_xadd.add_argument("--ip-limit", type=int, default=2)
-    p_xadd.add_argument("--uuid", default="")
-
-    p_xedit = sub.add_parser("xray-edit")
-    p_xedit.add_argument("--uuid", required=True)
-    p_xedit.add_argument("--json", required=True)
-
-    p_xdel = sub.add_parser("xray-del")
-    p_xdel.add_argument("--uuid", required=True)
 
     p_set = sub.add_parser("settings")
     p_set.add_argument("--json", required=True)
@@ -1744,9 +1510,6 @@ def main():
             prt = int(get_setting(conn, "panel_port", "8443"))
             is_viewer = actor_info.get("role") == "viewer"
             out = {"services": collect_services(), "ports": [] if is_viewer else collect_listening_ports(prt)}
-        elif args.cmd == "xray-sync":
-            sync_xray_config(conn, reload_service=True)
-            out = {"ok": True}
         elif args.cmd == "tg-test":
             out = send_telegram_test(conn)
         elif args.cmd == "bot-config":
@@ -1761,14 +1524,6 @@ def main():
             out = ssh_edit(conn, actor_info, args.username, json.loads(args.json), ip=cip)
         elif args.cmd == "ssh-del":
             out = ssh_del(conn, actor_info, args.username, ip=cip)
-        elif args.cmd == "xray-list":
-            out = xray_list(conn, actor_info)
-        elif args.cmd == "xray-add":
-            out = xray_add(conn, actor_info, args.username, args.proto, args.days, args.gb_limit, args.ip_limit, args.uuid, ip=cip)
-        elif args.cmd == "xray-edit":
-            out = xray_edit(conn, actor_info, args.uuid, json.loads(args.json), ip=cip)
-        elif args.cmd == "xray-del":
-            out = xray_del(conn, actor_info, args.uuid, ip=cip)
         elif args.cmd == "settings":
             out = apply_settings(conn, actor_info, json.loads(args.json), ip=cip)
         elif args.cmd == "admin-login":

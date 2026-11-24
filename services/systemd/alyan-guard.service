@@ -1,6 +1,6 @@
 [Unit]
-Description=Alyan Guard (SSH & Xray GB Quota, Multi-IP & Expiry Enforcer)
-After=network.target xray.service alyan-wsd.service
+Description=Alyan Guard (SSH GB Quota, Multi-IP & Expiry Enforcer)
+After=network.target alyan-wsd.service
 
 [Service]
 Type=simple

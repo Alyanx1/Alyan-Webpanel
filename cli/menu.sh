@@ -37,32 +37,9 @@ svc_dot() {
   fi
 }
 
-make_xray_links() {
-  local proto="$1" user="$2" uuid="$3" dom="$4"
-  python3 - "$proto" "$user" "$uuid" "$dom" <<'PY'
-import base64, json, sys, urllib.parse
-proto, user, uid, dom = sys.argv[1:5]
-tag = urllib.parse.quote(f"Alyan-{user}")
-if proto == "vless":
-    print(f"  VLESS WS TLS  : vless://{uid}@{dom}:443?encryption=none&security=tls&sni={dom}&type=ws&host={dom}&path=%2Falyan-vless#{tag}-WS-TLS")
-    print(f"  VLESS WS 80   : vless://{uid}@{dom}:80?encryption=none&security=none&type=ws&host={dom}&path=%2Falyan-vless#{tag}-WS-80")
-    print(f"  VLESS gRPC    : vless://{uid}@{dom}:443?encryption=none&security=tls&sni={dom}&type=grpc&serviceName=alyan-vless-grpc#{tag}-gRPC")
-    print(f"  VLESS XHTTP   : vless://{uid}@{dom}:443?encryption=none&security=tls&sni={dom}&type=xhttp&host={dom}&path=%2Falyan-xhttp#{tag}-XHTTP")
-elif proto == "vmess":
-    for port, tls in (("443", "tls"), ("80", "")):
-        obj = {"v": "2", "ps": f"Alyan-{user}-{port}", "add": dom, "port": port, "id": uid, "aid": "0", "scy": "auto", "net": "ws", "type": "none", "host": dom, "path": "/alyan-vmess", "tls": tls, "sni": dom if tls else ""}
-        b64 = base64.b64encode(json.dumps(obj, separators=(",", ":")).encode()).decode()
-        print(f"  VMess WS {port:<4} : vmess://{b64}")
-elif proto == "trojan":
-    print(f"  Trojan TCP    : trojan://{uid}@{dom}:443?security=tls&sni={dom}&type=tcp#{tag}-TCP")
-    print(f"  Trojan WS TLS : trojan://{uid}@{dom}:443?security=tls&sni={dom}&type=ws&host={dom}&path=%2Falyan-trojan#{tag}-WS")
-    print(f"  Trojan gRPC   : trojan://{uid}@{dom}:443?security=tls&sni={dom}&type=grpc&serviceName=alyan-trojan-grpc#{tag}-gRPC")
-PY
-}
-
 draw_header() {
   clear || true
-  local ov domain ip port cpu ram up ssh_tot ssh_on xray_tot ssl_d
+  local ov domain ip port cpu ram up ssh_tot ssh_on ssl_d
   ov=$($CTL --actor cli overview 2>/dev/null || echo '{}')
   domain=$(echo "$ov" | jq -r '.cfg.domain // "unconfigured"')
   ip=$(echo "$ov" | jq -r '.cfg.ip // "127.0.0.1"')
@@ -73,7 +50,6 @@ draw_header() {
   ram=$(echo "$ov" | jq -r '.ram_pct // 0')
   ssh_tot=$(echo "$ov" | jq -r '.ssh_total // 0')
   ssh_on=$(echo "$ov" | jq -r '.ssh_online // 0')
-  xray_tot=$(echo "$ov" | jq -r '.xray_total // 0')
 
   echo ""
   echo -e "\033[1;38;2;255;30;30m   █████╗  ██╗   ██╗   ██╗  █████╗  ███╗   ██╗${C_RST}"
@@ -85,9 +61,9 @@ draw_header() {
   echo -e "  🔥 ${C_GLD}${C_BOLD}ALYAN WEBPANEL${C_RST} ${C_GRY}· FLAME TUNNELING COMMAND DECK${C_RST}"
   echo -e "  ${C_RED}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RST}"
   printf "  ${C_RED}┃${C_RST} ${C_GRY}Domain :${C_RST} ${C_GLD}%-24s${C_RST} ${C_GRY}IP :${C_RST} ${C_WHT}%-16s${C_RST} ${C_GRY}SSL:${C_RST} ${C_AMB}%3sd${C_RST} ${C_RED}┃${C_RST}\n" "$domain" "$ip" "$ssl_d"
-  printf "  ${C_RED}┃${C_RST} ${C_GRY}CPU/RAM:${C_RST} ${C_WHT}%2s%% / %2s%%${C_RST}   ${C_GRY}Up:${C_RST} ${C_WHT}%-9s${C_RST} ${C_GRY}SSH:${C_RST} ${C_AMB}%s (%s live)${C_RST}  ${C_GRY}Xray:${C_RST} ${C_AMB}%s${C_RST}  ${C_RED}┃${C_RST}\n" "$cpu" "$ram" "$up" "$ssh_tot" "$ssh_on" "$xray_tot"
+  printf "  ${C_RED}┃${C_RST} ${C_GRY}CPU/RAM:${C_RST} ${C_WHT}%2s%% / %2s%%${C_RST}   ${C_GRY}Up:${C_RST} ${C_WHT}%-9s${C_RST} ${C_GRY}SSH Accounts:${C_RST} ${C_AMB}%s (%s live)${C_RST}      ${C_RED}┃${C_RST}\n" "$cpu" "$ram" "$up" "$ssh_tot" "$ssh_on"
   echo -e "  ${C_RED}┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫${C_RST}"
-  echo -e "  ${C_RED}┃${C_RST} HAProxy $(svc_dot haproxy)  Nginx $(svc_dot nginx)  Dropbear $(svc_dot dropbear)  WS $(svc_dot alyan-wsd)  Xray $(svc_dot xray) ${C_RED}┃${C_RST}"
+  echo -e "  ${C_RED}┃${C_RST} HAProxy $(svc_dot haproxy)  Nginx $(svc_dot nginx)  Dropbear $(svc_dot dropbear)  WS-Proxy $(svc_dot alyan-wsd)     ${C_RED}┃${C_RST}"
   echo -e "  ${C_RED}┃${C_RST} Panel   $(svc_dot alyan-panel)  Guard $(svc_dot alyan-guard)  Bot   $(svc_dot alyan-bot)  BBR+FQ ${C_OK}● ON ${C_RST}  :${port}     ${C_RED}┃${C_RST}"
   echo -e "  ${C_RED}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RST}"
 }
@@ -162,14 +138,15 @@ opt_ssl_cert() {
 opt_manage_users() {
   while true; do
     draw_header
-    echo -e "  ${C_AMB}${C_BOLD}👥 Option 4 — Manage Users / Limits / Banner${C_RST}"
-    echo -e "  ${C_ORG}  [1]${C_WHT} Create SSH Account (+ /alyan Payload)     ${C_ORG}[6]${C_WHT} Create Xray Client (VLESS/VMess/Trojan)${C_RST}"
-    echo -e "  ${C_ORG}  [2]${C_WHT} List SSH Accounts & Live IPs              ${C_ORG}[7]${C_WHT} List Xray Clients & Share Links${C_RST}"
-    echo -e "  ${C_ORG}  [3]${C_WHT} Edit / Renew SSH Limits (Days/GB/IP)      ${C_ORG}[8]${C_WHT} Edit Xray Client${C_RST}"
-    echo -e "  ${C_ORG}  [4]${C_WHT} Enable / Disable SSH Account              ${C_ORG}[9]${C_WHT} Delete Xray Client${C_RST}"
-    echo -e "  ${C_ORG}  [5]${C_WHT} Delete SSH Account                        ${C_ORG}[10]${C_WHT} Set SSH Handshake Banner${C_RST}"
+    echo -e "  ${C_AMB}${C_BOLD}👥 Option 4 — Manage SSH Accounts / Limits / Banner${C_RST}"
+    echo -e "  ${C_ORG}  [1]${C_WHT} Create SSH Account (+ /alyan Payload)"
+    echo -e "  ${C_ORG}  [2]${C_WHT} List SSH Accounts & Live IPs"
+    echo -e "  ${C_ORG}  [3]${C_WHT} Edit / Renew SSH Limits (Days/GB/IP)"
+    echo -e "  ${C_ORG}  [4]${C_WHT} Enable / Disable SSH Account"
+    echo -e "  ${C_ORG}  [5]${C_WHT} Delete SSH Account"
+    echo -e "  ${C_ORG}  [6]${C_WHT} Set SSH Handshake Banner${C_RST}"
     echo -e "  ${C_ORG}  [0]${C_GRY} Back to Main Menu${C_RST}\n"
-    read -rp "  Select action [0-10]: " uopt </dev/tty
+    read -rp "  Select action [0-6]: " uopt </dev/tty
     case "$uopt" in
       1)
         read -rp "  Username       : " u </dev/tty
@@ -222,54 +199,7 @@ opt_manage_users() {
         res=$($CTL --actor cli ssh-del --username "$u" 2>&1)
         echo "$res" | jq -e '.ok' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Deleted ${u}.${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
         pause_ret ;;
-      6)
-        read -rp "  Protocol (vless/vmess/trojan) [vless]: " pr </dev/tty; pr="${pr:-vless}"
-        read -rp "  Client Username : " u </dev/tty
-        read -rp "  Validity Days [30]: " d </dev/tty; d="${d:-30}"
-        read -rp "  GB Limit (0=∞) [0]: " g </dev/tty; g="${g:-0}"
-        read -rp "  User Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
-        res=$($CTL --actor cli xray-add --username "$u" --proto "$pr" --days "$d" --gb-limit "$g" --ip-limit "$ipm" 2>&1)
-        if echo "$res" | jq -e '.item' >/dev/null 2>&1; then
-          uid=$(echo "$res" | jq -r '.item.uuid')
-          dom=$(echo "$res" | jq -r '.cfg.domain')
-          echo -e "\n  ${C_OK}✔ Created ${pr^^} client '${u}' (UUID: ${uid})${C_RST}"
-          make_xray_links "$pr" "$u" "$uid" "$dom"
-        else
-          echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
-        fi
-        pause_ret ;;
-      7)
-        res=$($CTL --actor cli xray-list)
-        dom=$(echo "$res" | jq -r '.cfg.domain')
-        echo ""
-        printf "  ${C_AMB}%-14s %-8s %-12s %-38s${C_RST}\n" "USERNAME" "PROTO" "EXPIRY" "UUID / KEY"
-        echo "$res" | jq -r '.items[] | "\(.username)|\(.proto)|\(.expiry)|\(.uuid)"' | \
-        while IFS='|' read -r un pr ex uu; do
-          printf "  %-14s %-8s %-12s %-38s\n" "$un" "${pr^^}" "$ex" "$uu"
-        done
-        read -rp "  Enter username to print share links (or Enter to skip): " lu </dev/tty
-        if [[ -n "$lu" ]]; then
-          row=$(echo "$res" | jq -c --arg u "$lu" '.items[] | select(.username==$u)' | head -n1)
-          if [[ -n "$row" ]]; then
-            make_xray_links "$(echo "$row" | jq -r '.proto')" "$lu" "$(echo "$row" | jq -r '.uuid')" "$dom"
-          fi
-        fi
-        pause_ret ;;
-      8)
-        read -rp "  Enter Xray Client UUID to edit: " uu </dev/tty
-        read -rp "  New Days [30]     : " d </dev/tty; d="${d:-30}"
-        read -rp "  GB Limit (0=∞) [0]: " g </dev/tty; g="${g:-0}"
-        read -rp "  User Limit (0=∞) [2]: " ipm </dev/tty; ipm="${ipm:-2}"
-        payload=$(jq -nc --argjson d "$d" --argjson g "$g" --argjson i "$ipm" '{days:$d,gb_limit:$g,ip_limit:$i}')
-        res=$($CTL --actor cli xray-edit --uuid "$uu" --json "$payload" 2>&1)
-        echo "$res" | jq -e '.item' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Xray client updated!${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
-        pause_ret ;;
-      9)
-        read -rp "  Enter Xray Client UUID to DELETE: " uu </dev/tty
-        res=$($CTL --actor cli xray-del --uuid "$uu" 2>&1)
-        echo "$res" | jq -e '.ok' >/dev/null 2>&1 && echo -e "  ${C_OK}✔ Xray client removed.${C_RST}" || echo -e "  ${C_ERR}✖ $(echo "$res" | jq -r '.error // .')${C_RST}"
-        pause_ret ;;
-      10)
+      6|10)
         echo -e "  Enter new SSH Banner HTML/Text (single line, leave blank to cancel):"
         read -rp "  Banner > " btxt </dev/tty
         if [[ -n "$btxt" ]]; then
@@ -313,8 +243,8 @@ opt_status_ports() {
 
 # ─── Option 6: Fix SSH-WS / SSL Stack ────────────────────────────────────────
 opt_fix_stack() {
-  echo -e "\n  ${C_AMB}${C_BOLD}🛠 Option 6 — Fix SSH-WS (/alyan) / SSL / HAProxy / Xray Stack${C_RST}"
-  echo -e "  ${C_ORG}🔥 Rebuilding PEM bundle, Dropbear 109/143 override, Nginx, HAProxy & Xray configs...${C_RST}"
+  echo -e "\n  ${C_AMB}${C_BOLD}🛠 Option 6 — Fix SSH-WS (/alyan) / SSL / HAProxy Stack${C_RST}"
+  echo -e "  ${C_ORG}🔥 Rebuilding PEM bundle, Dropbear 109/143 override, Nginx & HAProxy configs...${C_RST}"
   $CTL --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
   $CTL --actor cli service all restart >/dev/null
   echo -e "  ${C_OK}✔ Full SSH-WS + SSL + Multiplexer stack repaired & restarted!${C_RST}"
@@ -343,7 +273,7 @@ opt_vps_stats() {
   echo -e "  ${C_GRY}Location    :${C_RST} $(echo "$tel" | jq -r '.cfg.location') · $(echo "$tel" | jq -r '.cfg.provider')"
   echo -e "  ${C_GRY}CPU / Load  :${C_RST} $(echo "$tel" | jq -r '.cpu_pct')%  (load: $(echo "$tel" | jq -r '.load'))"
   echo -e "  ${C_GRY}RAM / Disk  :${C_RST} RAM $(echo "$tel" | jq -r '.ram_pct')%  ·  Disk $(echo "$tel" | jq -r '.disk_pct')%"
-  echo -e "  ${C_GRY}Live Tunnels:${C_RST} SSH $(echo "$tel" | jq -r '.ssh_online') online · Xray $(echo "$tel" | jq -r '.xray_online // 0') online"
+  echo -e "  ${C_GRY}Live Tunnels:${C_RST} SSH $(echo "$tel" | jq -r '.ssh_online') online"
   pause_ret
 }
 

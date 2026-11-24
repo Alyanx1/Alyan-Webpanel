@@ -3,7 +3,7 @@
 #  🔥 ALYAN WEBPANEL — Automated Flame Tunneling Stack & Web Dashboard Installer
 #  Target OS : Ubuntu 22.04 LTS / 24.04 LTS & newer (x86_64 / arm64)
 #  Stack     : HAProxy (80/443) + Nginx + Dropbear (109/143) + WS (/alyan) +
-#              Xray (VLESS/VMess/Trojan) + Wire-Speed BBR + FastAPI Webpanel + Bot
+#              Wire-Speed BBR + FastAPI Webpanel + Bot
 #  Install   : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh | tr -d '\r')
 #  Update    : bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/install.sh | tr -d '\r') --update
 # ═════════════════════════════════════════════════════════════════════════════
@@ -49,7 +49,7 @@ flame_banner() {
   echo ""
   echo -e "${C_GLD}  🔥  A L Y A N   W E B P A N E L  ${C_GRY}v${ALYAN_VERSION} · INFERNO COMMAND DECK${C_RST}"
   echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}"
-  echo -e "${C_WHT}  SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Xray · Wire-Speed BBR${C_RST}"
+  echo -e "${C_WHT}  SSH · Dropbear · WS (/alyan) · SSL · HAProxy · Wire-Speed BBR${C_RST}"
   echo -e "${C_GRY}  ─────────────────────────────────────────────────────────────────${C_RST}\n"
 }
 
@@ -108,8 +108,7 @@ preflight_check() {
   fi
   ARCH=$(uname -m)
   case "$ARCH" in
-    x86_64|amd64) XRAY_ARCH="64" ;;
-    aarch64|arm64) XRAY_ARCH="arm64-v8a" ;;
+    x86_64|amd64|aarch64|arm64) ;;
     *) echo -e "${C_ERR}✖ Unsupported CPU architecture: ${ARCH}${C_RST}"; exit 1 ;;
   esac
 }
@@ -163,7 +162,6 @@ deploy_project_files() {
   fetch_asset "templates/haproxy.cfg.tpl"        "${INSTALL_DIR}/templates/haproxy.cfg.tpl"
   fetch_asset "templates/nginx-router.conf.tpl"  "${INSTALL_DIR}/templates/nginx-router.conf.tpl"
   fetch_asset "templates/nginx-panel.conf.tpl"   "${INSTALL_DIR}/templates/nginx-panel.conf.tpl"
-  fetch_asset "templates/xray-config.json.tpl"   "${INSTALL_DIR}/templates/xray-config.json.tpl"
   fetch_asset "cli/menu.sh"                      "${INSTALL_DIR}/cli/menu.sh"
   fetch_asset "panel/app.py"                     "${INSTALL_DIR}/panel/app.py"
   fetch_asset "panel/static/index.html"          "${INSTALL_DIR}/panel/static/index.html"
@@ -173,7 +171,7 @@ deploy_project_files() {
   for unit in alyan-wsd alyan-guard alyan-panel alyan-bot; do
     fetch_asset "services/systemd/${unit}.service" "/etc/systemd/system/${unit}.service"
   done
-  rm -rf "/tmp/alyan-bundle-src" "${INSTALL_DIR}/services/qos"
+  rm -rf "/tmp/alyan-bundle-src" "${INSTALL_DIR}/services/qos" "${INSTALL_DIR}/templates/xray-config.json.tpl"
   chmod +x "${INSTALL_DIR}/install.sh" "${INSTALL_DIR}/core/alyan-ctl" "${INSTALL_DIR}/cli/menu.sh" "${INSTALL_DIR}/services/guard/alyan-guard.py" "${INSTALL_DIR}/services/wsd/alyan-wsd.py" 2>/dev/null || true
   ln -sf "${INSTALL_DIR}/core/alyan-ctl" /usr/local/bin/alyan-ctl
   ln -sf "${INSTALL_DIR}/cli/menu.sh" /usr/local/bin/menu
@@ -212,9 +210,11 @@ if [[ "${1:-}" == "--update" ]]; then
   preflight_check
   flame_banner
   section_hdr "UPDATE" "Applying Live Alyan Webpanel Wire-Speed Hot-Update"
-  systemctl stop alyan-panel alyan-bot alyan-qos 2>/dev/null || true
-  systemctl disable alyan-qos 2>/dev/null || true
-  rm -f /etc/systemd/system/alyan-qos.service /etc/alyan/qos.json /etc/sysctl.d/99-alyan-bbr.conf
+  systemctl stop alyan-panel alyan-bot alyan-qos xray 2>/dev/null || true
+  systemctl disable alyan-qos xray 2>/dev/null || true
+  rm -rf /etc/systemd/system/alyan-qos.service /etc/alyan/qos.json /etc/sysctl.d/99-alyan-bbr.conf \
+         /etc/systemd/system/xray.service /usr/local/bin/xray /usr/local/bin/geoip.dat /usr/local/bin/geosite.dat \
+         /usr/local/share/xray /usr/local/etc/xray /var/log/xray
   run_task 45 "Syncing latest Engine, Guard, WSD & UI from GitHub" deploy_project_files
   run_task 65 "Verifying service account & permissions" ensure_panel_service_user
   patch_dropbear_branding() {
@@ -242,12 +242,10 @@ except Exception:
   }
   run_task 80 "Ensuring Dropbear SSH-2.0-ALYAN_Server branding" patch_dropbear_branding
   rebuild_and_restart() {
-    : > /var/log/xray/access.log 2>/dev/null || true
-    : > /var/log/nginx/alyan-xray.log 2>/dev/null || true
     rm -f /run/alyan-live.json /run/alyan-live.tmp /run/alyan-ssl-cache.json
     systemctl daemon-reload
     /usr/local/bin/alyan-ctl --actor cli settings --json '{"maint":"fix_ws_ssl_stack"}' >/dev/null
-    for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
+    for svc in dropbear alyan-wsd nginx haproxy alyan-guard alyan-panel; do
       systemctl restart "$svc"
     done
     if systemctl is-enabled --quiet alyan-bot 2>/dev/null; then
@@ -307,7 +305,7 @@ while [[ -z "$CUSTOM_DOMAIN" ]]; do
 done
 
 PANEL_PORT="${ALYAN_PORT:-}"
-RESERVED_PORTS=" 22 53 80 109 143 443 2095 4443 7700 8880 8881 10001 10002 10003 10011 10012 10013 10021 10022 10023 10031 10085 "
+RESERVED_PORTS=" 22 53 80 109 143 443 2095 4443 7700 8880 8881 "
 while [[ -z "$PANEL_PORT" ]]; do
   printf "${C_ORG}┃ ${C_AMB}🔥 Enter Custom Port for Web Panel [default: 8443]: ${C_WHT}"
   read -r PANEL_PORT </dev/tty
@@ -327,7 +325,7 @@ done
 echo -e "${C_ORG}┗━━${C_OK}✔ Locked:${C_RST} Domain=${C_GLD}${CUSTOM_DOMAIN}${C_RST} · Webpanel Port=${C_GLD}${PANEL_PORT}${C_RST}"
 
 # ─── STEP 3: Core Tunneling Stack, SSL, Engine & Web Panel ───────────────────
-section_hdr "3/5" "Forging Tunneling Stack (Nginx · HAProxy · Dropbear · Xray · SSL · Webpanel)"
+section_hdr "3/5" "Forging Tunneling Stack (Nginx · HAProxy · Dropbear · SSL · Webpanel)"
 
 install_daemons_pkg() {
   apt-get install -y --no-install-recommends dropbear nginx haproxy
@@ -355,34 +353,8 @@ except Exception:
 " 2>/dev/null || true
   fi
 }
-run_task 44 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_pkg
-run_task 54 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files
-
-install_xray_core() {
-  mkdir -p /usr/local/bin /usr/local/share/xray /usr/local/etc/xray /var/log/xray
-  local tmp_zip="/tmp/xray.zip"
-  curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip" -o "$tmp_zip"
-  unzip -qo "$tmp_zip" xray geoip.dat geosite.dat -d /usr/local/bin/
-  cp -f /usr/local/bin/geoip.dat /usr/local/bin/geosite.dat /usr/local/share/xray/ 2>/dev/null || true
-  chmod +x /usr/local/bin/xray
-  rm -f "$tmp_zip"
-  cat >/etc/systemd/system/xray.service <<'UNIT'
-[Unit]
-Description=Alyan Xray-Core Multi-Protocol Engine
-After=network.target nss-lookup.target
-
-[Service]
-User=root
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-}
-run_task 66 "Installing Xray-Core (VLESS · VMess · Trojan · XHTTP)" install_xray_core
+run_task 46 "Installing Dropbear SSH, Nginx & HAProxy packages" install_daemons_pkg
+run_task 60 "Deploying Alyan Engine, Templates & Inferno UI" deploy_project_files
 
 setup_panel_venv() {
   ensure_panel_service_user
@@ -404,7 +376,7 @@ issue_ssl_and_render() {
   cat "${ETC_DIR}/ssl/fullchain.pem" "${ETC_DIR}/ssl/privkey.pem" > "${ETC_DIR}/ssl/haproxy.pem"
   chmod 600 "${ETC_DIR}/ssl/"*.pem
 
-  # Initialize SQLite DB, generate admin password, render Dropbear/Nginx/HAProxy/Xray configs
+  # Initialize SQLite DB, generate admin password, render Dropbear/Nginx/HAProxy configs
   /usr/local/bin/alyan-ctl init --domain "$CUSTOM_DOMAIN" --panel-port "$PANEL_PORT" --iface "$DEF_IFACE" --ip "$PUB_IP"
 
   # Attempt live Let's Encrypt certificate via acme.sh standalone on port 80 before HAProxy binds
@@ -417,17 +389,17 @@ run_task 90 "Issuing Let's Encrypt SSL & compiling Flame Router" issue_ssl_and_r
 
 start_all_services() {
   systemctl daemon-reload
-  for svc in dropbear alyan-wsd xray nginx haproxy alyan-guard alyan-panel; do
+  for svc in dropbear alyan-wsd nginx haproxy alyan-guard alyan-panel; do
     systemctl enable "$svc" >/dev/null 2>&1 || true
     systemctl restart "$svc"
   done
 }
-run_task 98 "Starting HAProxy, Nginx, Dropbear, WS-Proxy, Xray & Panel" start_all_services
+run_task 98 "Starting HAProxy, Nginx, Dropbear, WS-Proxy & Panel" start_all_services
 
 # ─── STEP 4: Final Health & Verification Check ───────────────────────────────
 section_hdr "4/5" "Final Stack Health & Socket Verification"
 
-SERVICES_CHECK=(haproxy nginx dropbear alyan-wsd xray alyan-guard alyan-panel)
+SERVICES_CHECK=(haproxy nginx dropbear alyan-wsd alyan-guard alyan-panel)
 ALL_HEALTHY=1
 for svc in "${SERVICES_CHECK[@]}"; do
   if systemctl is-active --quiet "$svc"; then

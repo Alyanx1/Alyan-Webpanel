@@ -1,6 +1,5 @@
 # ═════════════════════════════════════════════════════════════════════════════
 #  🔥 ALYAN WEBPANEL — ACME Challenge & Edge Landing Router (Nginx)
-#  Xray WS / XHTTP / gRPC / TCP now route directly through HAProxy -> Xray
 # ═════════════════════════════════════════════════════════════════════════════
 server {
     listen 127.0.0.1:8880 proxy_protocol backlog=4096;
