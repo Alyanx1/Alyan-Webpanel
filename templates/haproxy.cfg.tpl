@@ -42,12 +42,11 @@ frontend fe_http_80
     tcp-request inspect-delay 1s
 
     acl is_raw_ssh    payload(0,4) -m bin 5353482d
-    acl is_acme       payload(0,256) -m sub /.well-known/acme-challenge/
-    acl is_xray       payload(0,256) -m sub /alyan-vless || payload(0,256) -m sub /alyan-vmess || payload(0,256) -m sub /alyan-trojan || payload(0,256) -m sub /alyan-xhttp || payload(0,256) -m sub alyan-vless-grpc
+    acl is_acme       req.payload(0,0) -m sub /.well-known/acme-challenge/
+    acl is_xray       req.payload(0,0) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp alyan-vless-grpc
     acl is_http_80    payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
     tcp-request content accept if is_raw_ssh or is_acme or is_xray or is_http_80
-    tcp-request content accept
 
     use_backend be_dropbear  if is_raw_ssh
     use_backend be_nginx_ws  if is_acme or is_xray
@@ -63,7 +62,6 @@ frontend fe_edge_443
     acl is_tls      req.ssl_hello_type 1
 
     tcp-request content accept if is_raw_ssh or is_tls
-    tcp-request content accept
 
     use_backend be_dropbear      if is_raw_ssh
     default_backend be_tls_loop
@@ -74,16 +72,15 @@ backend be_tls_loop
 
 # ─── INTERNAL TLS TERMINATOR & SSH-SSL / SSH-WS / XRAY DISPATCHER ────────────
 frontend fe_tls_terminator
-    bind 127.0.0.1:4443 accept-proxy ssl crt /etc/alyan/ssl/haproxy.pem alpn h2,http/1.1
+    bind 127.0.0.1:4443 accept-proxy ssl crt /etc/alyan/ssl/haproxy.pem alpn http/1.1
     mode tcp
     tcp-request inspect-delay 1s
 
     acl is_ssh_ssl    payload(0,4) -m bin 5353482d
-    acl is_xray       payload(0,256) -m sub /alyan-vless || payload(0,256) -m sub /alyan-vmess || payload(0,256) -m sub /alyan-trojan || payload(0,256) -m sub /alyan-xhttp || payload(0,256) -m sub alyan-vless-grpc
+    acl is_xray       req.payload(0,0) -m sub -i /alyan-vless /alyan-vmess /alyan-trojan /alyan-xhttp alyan-vless-grpc
     acl is_http_req   payload(0,8) -m beg GET POST HEAD PUT OPTIONS CONNECT PATCH
 
     tcp-request content accept if is_ssh_ssl or is_xray or is_http_req
-    tcp-request content accept
 
     use_backend be_dropbear        if is_ssh_ssl
     use_backend be_nginx_ws        if is_xray
