@@ -309,6 +309,51 @@ async def api_ssh_delete(username: str, request: Request, sess: dict = Depends(r
     return res
 
 
+# ─── Xray Accounts Routes ────────────────────────────────────────────────────
+@app.get("/api/xray")
+async def api_xray_list(request: Request, sess: dict = Depends(require_session)):
+    return await cached_ctl_read(f"xray:{sess['username']}", ["xray-list"], sess["username"], client_ip(request))
+
+
+@app.post("/api/xray")
+async def api_xray_create(request: Request, sess: dict = Depends(require_session)):
+    b = await request.json()
+    res = await run_ctl(
+        [
+            "xray-add",
+            "--username", str(b.get("username") or ""),
+            "--proto", str(b.get("proto") or "vless"),
+            "--days", str(int(float(b.get("days") or 30))),
+            "--gb-limit", str(float(b.get("gb_limit") or 0)),
+            "--ip-limit", str(int(float(b.get("ip_limit") or 0))),
+            "--uuid", str(b.get("uuid") or ""),
+        ],
+        actor=sess["username"],
+        ip=client_ip(request),
+    )
+    invalidate_read_cache()
+    return res
+
+
+@app.patch("/api/xray/{uuid_key}")
+async def api_xray_edit(uuid_key: str, request: Request, sess: dict = Depends(require_session)):
+    b = await request.json()
+    res = await run_ctl(
+        ["xray-edit", "--uuid", uuid_key, "--json", json.dumps(b)],
+        actor=sess["username"],
+        ip=client_ip(request),
+    )
+    invalidate_read_cache()
+    return res
+
+
+@app.delete("/api/xray/{uuid_key}")
+async def api_xray_delete(uuid_key: str, request: Request, sess: dict = Depends(require_session)):
+    res = await run_ctl(["xray-del", "--uuid", uuid_key], actor=sess["username"], ip=client_ip(request))
+    invalidate_read_cache()
+    return res
+
+
 # ─── Engine, Daemons & Ports Routes ──────────────────────────────────────────
 @app.get("/api/engine")
 async def api_engine(request: Request, sess: dict = Depends(require_session)):

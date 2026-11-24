@@ -44,6 +44,12 @@ bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/i
   ```
   *(Note: `User-Agent: [ua]` ensures smooth handshake across AWS CloudFront WAF and Cloudflare).*
 
+### 2. Xray VLESS (Direct / Cloudflare CDN / AWS CloudFront CDN)
+* **Protocol:** VLESS
+* **Port:** `80` (HTTP WS) or `443` (TLS WS)
+* **Path:** `/alyan-vless`
+* **Host / SNI:** `<your-domain-or-cdn-domain>`
+
 ---
 
 ## 🖥 CLI Shortcuts
@@ -60,11 +66,14 @@ bash <(curl -sSL https://raw.githubusercontent.com/Alyanx1/Alyan-Webpanel/main/i
 - **Public Port `80` & `443` (HAProxy + Nginx Zero-Buffer Multiplexer):**
   - **SSH WebSocket (`/alyan`):** `80` (HTTP WS) & `443` (TLS 1.3 WS) → `alyan-wsd` (`127.0.0.1:2095` with `PROXY-v2` Real-IP & `TCP_NODELAY`) → Dropbear (`127.0.0.1:109`)
   - **SSH Direct & SSL:** `22` (OpenSSH), `109` & `143` (Dropbear Direct `SSH-2.0-ALYAN_Server`), `443` (SSH over TLS)
+  - **Xray VLESS:** WS (`/alyan-vless`), gRPC (`alyan-vless-grpc`), XHTTP (`/alyan-xhttp`) with Cloudflare, CloudFront & `X-Forwarded-For` Real-IP unwrapping
+  - **Xray VMess:** WS (`/alyan-vmess` on `80` & `443`)
+  - **Xray Trojan:** Native TCP TLS (`443`), WS (`/alyan-trojan`), gRPC (`alyan-trojan-grpc`)
 - **Custom HTTPS Port (`https://<domain>:<port>`):**
   - Nginx TLS 1.3 + HTTP/2 reverse proxy → FastAPI Uvicorn (`127.0.0.1:7700`) with real-time 2s live telemetry
 - **Enforcement & Wire-Speed Engine:**
   - **Kernel BBR + `fq` Packet Pacing (`/etc/sysctl.d/99-alyan-turbo.conf`):** Unthrottled wire-speed throughput, 64 MB socket buffers, `tcp_nodelay`, and optimized CDN bufferbloat mitigation for stable ping.
-  - **`alyan-guard.service`:** Real-time GB quota tracking, expiry auto-lock, session-based concurrent user limiter, live active session counting, sub-2-second disconnect offline detection, and strict multi-login auto-disable across SSH, Dropbear, and WS `/alyan`.
+  - **`alyan-guard.service`:** Real-time GB quota tracking, expiry auto-lock, session-based concurrent user limiter, live active session counting, sub-2-second disconnect offline detection, and strict multi-login auto-disable across SSH, Dropbear, WS `/alyan`, and Xray.
   - **`alyan-bot.service`:** Full remote Telegram Bot with inline keyboards & step-by-step account wizards.
 
 ---
@@ -92,6 +101,7 @@ alyan-webpanel/
 │   └── systemd/*.service            # Systemd Unit Definitions
 └── templates/
     ├── haproxy.cfg.tpl              # 80/443 High-Concurrency TCP/TLS/ALPN Multiplexer
-    ├── nginx-router.conf.tpl        # Zero-Buffer WS & Real-IP Router
-    └── nginx-panel.conf.tpl         # Custom-Port HTTPS Webpanel Listener
+    ├── nginx-router.conf.tpl        # Zero-Buffer WS, XHTTP, gRPC & Real-IP Router
+    ├── nginx-panel.conf.tpl         # Custom-Port HTTPS Webpanel Listener
+    └── xray-config.json.tpl         # Xray-Core Multi-Protocol Configuration
 ```

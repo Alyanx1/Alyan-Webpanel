@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Alyan Webpanel — Full Remote User-Management Telegram Bot (bot/alyan-bot.py)
-Runs as `alyan-bot.service` (`User=_alyanpanel`), communicating with `/usr/local/bin/alyan-ctl`.
+Runs as `alyan-bot.service` (`User=alyan`), communicating with `/usr/local/bin/alyan-ctl`.
 Supports interactive Inline Keyboards, step-by-step wizards, and direct slash commands:
-  /start, /addssh, /delssh, /renewssh, /users, /status, /restart
+  /start, /addssh, /delssh, /renewssh, /addxray, /delxray, /users, /status, /restart
 """
 import asyncio
+import base64
 import html
 import json
 import os
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -80,19 +82,65 @@ def build_ssh_card_html(item: dict, domain: str) -> str:
     )
 
 
+def build_xray_card_html(item: dict, domain: str) -> str:
+    proto = item["proto"]
+    u = item["username"]
+    uid = item["uuid"]
+    tag = urllib.parse.quote(f"Alyan-{u}")
+    uris = []
+    if proto == "vless":
+        uris.append(("VLESS WS TLS (443)", f"vless://{uid}@{domain}:443?encryption=none&security=tls&sni={domain}&type=ws&host={domain}&path=%2Falyan-vless#{tag}-WS"))
+        uris.append(("VLESS WS HTTP (80)", f"vless://{uid}@{domain}:80?encryption=none&security=none&type=ws&host={domain}&path=%2Falyan-vless#{tag}-80"))
+        uris.append(("VLESS gRPC (443)", f"vless://{uid}@{domain}:443?encryption=none&security=tls&sni={domain}&type=grpc&serviceName=alyan-vless-grpc#{tag}-gRPC"))
+        uris.append(("VLESS XHTTP (443)", f"vless://{uid}@{domain}:443?encryption=none&security=tls&sni={domain}&type=xhttp&host={domain}&path=%2Falyan-xhttp#{tag}-XHTTP"))
+    elif proto == "vmess":
+        for prt, tls in (("443", "tls"), ("80", "")):
+            obj = {
+                "v": "2", "ps": f"Alyan-{u}-{prt}", "add": domain, "port": prt,
+                "id": uid, "aid": "0", "scy": "auto", "net": "ws", "type": "none",
+                "host": domain, "path": "/alyan-vmess", "tls": tls, "sni": domain if tls else "",
+            }
+            b64 = base64.b64encode(json.dumps(obj, separators=(",", ":")).encode()).decode()
+            uris.append((f"VMess WS ({prt})", f"vmess://{b64}"))
+    elif proto == "trojan":
+        uris.append(("Trojan TCP TLS (443)", f"trojan://{uid}@{domain}:443?security=tls&sni={domain}&type=tcp#{tag}-TCP"))
+        uris.append(("Trojan WS TLS (443)", f"trojan://{uid}@{domain}:443?security=tls&sni={domain}&type=ws&host={domain}&path=%2Falyan-trojan#{tag}-WS"))
+        uris.append(("Trojan gRPC (443)", f"trojan://{uid}@{domain}:443?security=tls&sni={domain}&type=grpc&serviceName=alyan-trojan-grpc#{tag}-gRPC"))
+
+    gb = f"{item['gb_limit']} GB" if item.get("gb_limit", 0) > 0 else "Unlimited"
+    lines = [
+        f"⚡ <b>ALYAN {proto.upper()} CLIENT CREATED</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"👤 <b>Client:</b> <code>{html.escape(u)}</code>",
+        f"🔑 <b>UUID/Key:</b> <code>{html.escape(uid)}</code>",
+        f"📅 <b>Expires:</b> <code>{html.escape(item['expiry'])}</code> · <b>Quota:</b> {gb}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for label, link in uris:
+        lines.append(f"<b>{html.escape(label)}:</b>\n<code>{html.escape(link)}</code>")
+    return "\n\n".join(lines)
+
+
 def main_menu_kb() -> dict:
     return {
         "inline_keyboard": [
             [
                 {"text": "➕ New SSH (/alyan)", "callback_data": "wiz:ssh"},
+                {"text": "⚡ New VLESS", "callback_data": "wiz:xray:vless"},
+            ],
+            [
+                {"text": "⚡ New VMess", "callback_data": "wiz:xray:vmess"},
+                {"text": "🔒 New Trojan", "callback_data": "wiz:xray:trojan"},
+            ],
+            [
                 {"text": "👥 All Users", "callback_data": "act:users"},
+                {"text": "📊 Server Status", "callback_data": "act:status"},
             ],
             [
                 {"text": "🔄 Renew SSH", "callback_data": "menu:renewssh"},
                 {"text": "🗑 Delete / Lock User", "callback_data": "menu:deluser"},
             ],
             [
-                {"text": "📊 Server Status", "callback_data": "act:status"},
                 {"text": "♻ Restart Daemons", "callback_data": "menu:restart"},
             ],
         ]
@@ -133,7 +181,7 @@ async def format_status_html() -> str:
         f"🖥 <b>IP / OS:</b> <code>{html.escape(cfg['ip'])}</code> · {html.escape(cfg['os'])}\n"
         f"⏱ <b>Uptime:</b> {html.escape(cfg['uptime'])} · <b>SSL:</b> {cfg['ssl_days']}d\n"
         f"⚡ <b>CPU:</b> {d['cpu_pct']}% · <b>RAM:</b> {d['ram_pct']}% · <b>Disk:</b> {d['disk_pct']}%\n"
-        f"👥 <b>SSH:</b> {d['ssh_total']} ({d['ssh_online']} online)\n"
+        f"👥 <b>SSH:</b> {d['ssh_total']} ({d['ssh_online']} online) · <b>Xray:</b> {d['xray_total']} ({d.get('xray_online', 0)} online)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(svc_lines)
     )
@@ -141,6 +189,7 @@ async def format_status_html() -> str:
 
 async def format_users_html() -> str:
     s_data = await ctl(["ssh-list"])
+    x_data = await ctl(["xray-list"])
     lines = ["👥 <b>ALYAN ACCOUNTS OVERVIEW</b>", "━━━━━━━━━━━━━━━━━━━━━━", "<b>SSH / WS (/alyan):</b>"]
     if not s_data["items"]:
         lines.append("<i>No SSH accounts</i>")
@@ -148,6 +197,13 @@ async def format_users_html() -> str:
         st = "🔴 disable" if u["status"] == "disabled" else (f"🟢 {u['online']} live" if u["online"] else "⚪ offline")
         qt = f"{fmt_bytes(u['used_bytes'])}/{u['gb_limit']}G" if u["gb_limit"] > 0 else fmt_bytes(u["used_bytes"])
         lines.append(f"• <code>{html.escape(u['username'])}</code> [{st}] — {qt} · exp <code>{u['expiry']}</code>")
+
+    lines.append("\n<b>Xray (VLESS / VMess / Trojan):</b>")
+    if not x_data["items"]:
+        lines.append("<i>No Xray clients</i>")
+    for u in x_data["items"][:25]:
+        st = "🔴 disable" if u["status"] == "disabled" else (f"🟢 {u['online']} live" if u["online"] else "⚪ offline")
+        lines.append(f"• <code>{html.escape(u['username'])}</code> ({u['proto'].upper()}) [{st}] — exp <code>{u['expiry']}</code>")
     return "\n".join(lines)
 
 
@@ -192,6 +248,31 @@ async def handle_wizard_input(client: httpx.AsyncClient, token: str, chat_id: in
             ])
             await send_msg(client, token, chat_id, build_ssh_card_html(res["item"], res["cfg"]["domain"]), main_menu_kb())
             return True
+
+        if step == "xray_user":
+            data["username"] = text.strip()
+            wiz["step"] = "xray_limits"
+            await send_msg(
+                client, token, chat_id,
+                f"📅 Enter <b>Days GB IPLimit</b> for {data['proto'].upper()} client <code>{html.escape(data['username'])}</code> (e.g. <code>30 0 2</code>):",
+            )
+            return True
+        if step == "xray_limits":
+            parts = text.split()
+            days = int(parts[0]) if len(parts) >= 1 else 30
+            gb = float(parts[1]) if len(parts) >= 2 else 0.0
+            ip_lim = int(parts[2]) if len(parts) >= 3 else 2
+            WIZARDS.pop(chat_id, None)
+            res = await ctl([
+                "xray-add",
+                "--username", data["username"],
+                "--proto", data["proto"],
+                "--days", str(days),
+                "--gb-limit", str(gb),
+                "--ip-limit", str(ip_lim),
+            ])
+            await send_msg(client, token, chat_id, build_xray_card_html(res["item"], res["cfg"]["domain"]), main_menu_kb())
+            return True
     except Exception as exc:
         WIZARDS.pop(chat_id, None)
         await send_msg(client, token, chat_id, f"❌ <b>Error:</b> {html.escape(str(exc))}", main_menu_kb())
@@ -213,6 +294,7 @@ async def handle_command(client: httpx.AsyncClient, token: str, chat_id: int, te
             f"Host: <code>{dom}</code> · Panel: <code>https://{dom}:{prt}</code>\n\n"
             f"Select an action below or use quick commands:\n"
             f"<code>/addssh user pass 30 0 2</code>\n"
+            f"<code>/addxray vless user 30 0 2</code>\n"
             f"<code>/renewssh user 30</code> · <code>/delssh user</code>\n"
             f"<code>/users</code> · <code>/status</code> · <code>/restart</code>"
         )
@@ -258,6 +340,30 @@ async def handle_command(client: httpx.AsyncClient, token: str, chat_id: int, te
             await send_msg(client, token, chat_id, "Usage: <code>/renewssh username 30</code>", main_menu_kb())
         return
 
+    if cmd == "/addxray":
+        if len(parts) >= 3:
+            pr, u = parts[1].lower(), parts[2]
+            d = parts[3] if len(parts) >= 4 else "30"
+            g = parts[4] if len(parts) >= 5 else "0"
+            i = parts[5] if len(parts) >= 6 else "2"
+            res = await ctl(["xray-add", "--username", u, "--proto", pr, "--days", d, "--gb-limit", g, "--ip-limit", i])
+            await send_msg(client, token, chat_id, build_xray_card_html(res["item"], res["cfg"]["domain"]), main_menu_kb())
+        else:
+            WIZARDS[chat_id] = {"step": "xray_user", "data": {"proto": "vless"}}
+            await send_msg(client, token, chat_id, "⚡ Enter new <b>VLESS Client Username</b>:")
+        return
+
+    if cmd == "/delxray":
+        if len(parts) >= 2:
+            target = parts[1]
+            x_data = await ctl(["xray-list"])
+            match = next((x["uuid"] for x in x_data["items"] if x["uuid"] == target or x["username"].lower() == target.lower()), target)
+            await ctl(["xray-del", "--uuid", match])
+            await send_msg(client, token, chat_id, f"✅ Removed Xray client <code>{html.escape(target)}</code>.", main_menu_kb())
+        else:
+            await send_msg(client, token, chat_id, "Usage: <code>/delxray username_or_uuid</code>", main_menu_kb())
+        return
+
     if cmd == "/restart":
         svc = parts[1] if len(parts) >= 2 else "all"
         await ctl(["service", svc, "restart"])
@@ -273,6 +379,12 @@ async def handle_callback(client: httpx.AsyncClient, token: str, chat_id: int, c
     if data == "wiz:ssh":
         WIZARDS[chat_id] = {"step": "ssh_user", "data": {}}
         await send_msg(client, token, chat_id, "👤 Enter new <b>SSH Username</b>:")
+        return
+
+    if data.startswith("wiz:xray:"):
+        proto = data.split(":")[2]
+        WIZARDS[chat_id] = {"step": "xray_user", "data": {"proto": proto}}
+        await send_msg(client, token, chat_id, f"⚡ Enter new <b>{proto.upper()} Client Username</b>:")
         return
 
     if data == "act:status":
@@ -298,16 +410,30 @@ async def handle_callback(client: httpx.AsyncClient, token: str, chat_id: int, c
 
     if data == "menu:deluser":
         s_data = await ctl(["ssh-list"])
+        x_data = await ctl(["xray-list"])
         rows = []
-        for u in s_data["items"][:12]:
+        for u in s_data["items"][:8]:
             tog = "🟢 Enable" if u["status"] == "disabled" else "⏸ Disable"
             nxt = "active" if u["status"] == "disabled" else "disabled"
             rows.append([
                 {"text": f"{tog} {u['username']}", "callback_data": f"stog:{u['username']}:{nxt}"},
                 {"text": f"🗑 SSH {u['username']}", "callback_data": f"sdel:{u['username']}"},
             ])
+        for x in x_data["items"][:8]:
+            xtog = "🟢 Enable" if x["status"] == "disabled" else "⏸ Disable"
+            xnxt = "active" if x["status"] == "disabled" else "disabled"
+            rows.append([
+                {"text": f"{xtog} {x['username']}", "callback_data": f"xtog:{x['uuid']}:{xnxt}"},
+                {"text": f"🗑 {x['proto'].upper()} {x['username']}", "callback_data": f"xdel:{x['uuid']}"},
+            ])
         rows.append([{"text": "⬅ Back", "callback_data": "back:main"}])
         await send_msg(client, token, chat_id, "Manage account lock or delete:", {"inline_keyboard": rows})
+        return
+
+    if data.startswith("xtog:"):
+        _, uid, nxt = data.split(":", 2)
+        await ctl(["xray-edit", "--uuid", uid, "--json", json.dumps({"status": nxt})])
+        await send_msg(client, token, chat_id, f"✅ Xray client → <b>{html.escape(nxt)}</b>", main_menu_kb())
         return
 
     if data.startswith("stog:"):
@@ -320,6 +446,12 @@ async def handle_callback(client: httpx.AsyncClient, token: str, chat_id: int, c
         u = data.split(":", 1)[1]
         await ctl(["ssh-del", "--username", u])
         await send_msg(client, token, chat_id, f"🗑 Deleted SSH user <code>{html.escape(u)}</code>.", main_menu_kb())
+        return
+
+    if data.startswith("xdel:"):
+        uid = data.split(":", 1)[1]
+        await ctl(["xray-del", "--uuid", uid])
+        await send_msg(client, token, chat_id, "🗑 Deleted Xray client.", main_menu_kb())
         return
 
     if data == "menu:restart":
@@ -335,7 +467,7 @@ async def handle_callback(client: httpx.AsyncClient, token: str, chat_id: int, c
                 ],
                 [
                     {"text": "WS-Proxy (/alyan)", "callback_data": "rst:alyan-wsd"},
-                    {"text": "Alyan Guard", "callback_data": "rst:alyan-guard"},
+                    {"text": "Xray-Core", "callback_data": "rst:xray"},
                 ],
                 [{"text": "⬅ Back", "callback_data": "back:main"}],
             ]

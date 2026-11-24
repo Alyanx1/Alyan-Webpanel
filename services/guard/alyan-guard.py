@@ -29,6 +29,7 @@ MANAGED_SERVICES = [
     ("nginx",       "Nginx Router & TLS",   "ACME & Panel HTTPS"),
     ("dropbear",    "Dropbear SSH",         "Direct Tunnel Ports 109 / 143"),
     ("alyan-wsd",   "Alyan WS-Proxy",       "GET /alyan 101 + Real-IP Bridge"),
+    ("xray",        "Xray-Core Multi-Engine", "VLESS · VMess · Trojan · XHTTP"),
     ("alyan-guard", "Alyan Guard",          "GB Quota · Expiry · IP Enforcer"),
     ("alyan-bot",   "Telegram Bot",         "Full User & Server Control"),
     ("alyan-panel", "Alyan Webpanel",       "FastAPI Command Deck"),
@@ -46,6 +47,13 @@ WSD_PORT_LAST_BYTES: dict[str, int] = {}
 PID_LAST_IO_BYTES: dict[int, int] = {}
 
 SSH_IP_STRIKES: dict[str, int] = {}
+
+XRAY_BIN = Path("/usr/local/bin/xray")
+XRAY_ACCESS_LOG = Path("/var/log/xray/access.log")
+XRAY_LAST_LOG_POS = 0
+XRAY_LAST_BYTES: dict[str, int] = {}
+XRAY_ACTIVE_SESSIONS: dict[str, dict] = {}
+XRAY_IP_STRIKES: dict[str, int] = {}
 
 DROPBEAR_AUTH_RE = re.compile(
     r"(?:dropbear\[(\d+)\]|\[(\d+)\]).*?(?:Password|Pubkey) auth succeeded for '([^']+)'",
@@ -596,6 +604,130 @@ def enforce_cycle():
                 ssh_sessions[uname] = []
                 send_telegram_alert(bot_cfg, reason)
 
+        # ─── 2. Scan Xray Live Sessions & Byte Counters ─────────────────────
+        xray_rows = conn.execute("SELECT * FROM xray_users").fetchall()
+        xray_resync_needed = False
+        xray_live: dict[str, dict] = {}
+
+        if xray_rows and XRAY_BIN.exists():
+            now_ts = time.time()
+            has_xray_sockets = False
+            try:
+                ss_chk = subprocess.check_output(
+                    ["ss", "-tHn", "state", "established", "( sport = :20001 or sport = :20002 or sport = :20003 or sport = :20004 or sport = :20005 )"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=1.0
+                )
+                if ss_chk.strip():
+                    has_xray_sockets = True
+            except Exception:
+                pass
+
+            if XRAY_ACCESS_LOG.exists():
+                global XRAY_LAST_LOG_POS
+                try:
+                    fsize = XRAY_ACCESS_LOG.stat().st_size
+                    if fsize < XRAY_LAST_LOG_POS:
+                        XRAY_LAST_LOG_POS = 0
+                    if fsize > XRAY_LAST_LOG_POS:
+                        with open(XRAY_ACCESS_LOG, "r", encoding="utf-8", errors="ignore") as f:
+                            f.seek(XRAY_LAST_LOG_POS)
+                            for line in f:
+                                m_acc = re.search(r"from\s+([^\s:]+)(?::\d+)?\s+accepted.*?email:\s*(\S+)", line)
+                                if m_acc:
+                                    raw_ip, email = m_acc.group(1), m_acc.group(2).lower()
+                                    clean_ip = clean_public_ip(raw_ip)
+                                    if clean_ip:
+                                        if email not in XRAY_ACTIVE_SESSIONS:
+                                            XRAY_ACTIVE_SESSIONS[email] = {"ips": set(), "last_seen": now_ts}
+                                        XRAY_ACTIVE_SESSIONS[email]["ips"].add(clean_ip)
+                                        XRAY_ACTIVE_SESSIONS[email]["last_seen"] = now_ts
+                            XRAY_LAST_LOG_POS = f.tell()
+                except Exception:
+                    pass
+
+            if not has_xray_sockets:
+                XRAY_ACTIVE_SESSIONS.clear()
+            else:
+                for email in list(XRAY_ACTIVE_SESSIONS.keys()):
+                    if (now_ts - XRAY_ACTIVE_SESSIONS[email].get("last_seen", 0)) > 12.0:
+                        XRAY_ACTIVE_SESSIONS.pop(email, None)
+
+            try:
+                sq_out = subprocess.check_output(
+                    [str(XRAY_BIN), "api", "statsquery", "--server=127.0.0.1:10085", "-pattern=user>>>"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=1.0
+                )
+                stats_list = json.loads(sq_out).get("stat", [])
+                user_totals: dict[str, int] = {}
+                for st in stats_list:
+                    s_name = st.get("name", "")
+                    m_stat = re.match(r"user>>>(.+?)>>>traffic>>>(uplink|downlink)", s_name)
+                    if m_stat:
+                        em = m_stat.group(1).lower()
+                        user_totals[em] = user_totals.get(em, 0) + int(st.get("value", 0))
+
+                for em, total_b in user_totals.items():
+                    prev_b = XRAY_LAST_BYTES.get(em, total_b)
+                    delta_x = total_b - prev_b
+                    XRAY_LAST_BYTES[em] = total_b
+                    if delta_x > 0:
+                        if em in XRAY_ACTIVE_SESSIONS:
+                            XRAY_ACTIVE_SESSIONS[em]["last_seen"] = now_ts
+                        if "@" in em:
+                            x_user, x_proto = em.split("@", 1)
+                            conn.execute(
+                                "UPDATE xray_users SET used_bytes = used_bytes + ? WHERE LOWER(username) = LOWER(?) AND proto = ?",
+                                (delta_x, x_user, x_proto),
+                            )
+            except Exception:
+                pass
+
+            for xr in xray_rows:
+                x_uuid = xr["uuid"]
+                x_uname = xr["username"]
+                x_proto = xr["proto"]
+                x_email = f"{x_uname}@{x_proto}".lower()
+                x_used = int(xr["used_bytes"])
+                x_gb = float(xr["gb_limit"] or 0)
+                x_iplim = int(xr["ip_limit"] or 0)
+
+                sess = XRAY_ACTIVE_SESSIONS.get(x_email, {})
+                active_ips = sorted(sess.get("ips", set()))
+                active_count = len(active_ips)
+
+                xray_live[x_uuid] = {"online": active_count if xr["status"] == "active" else 0, "ips": active_ips if xr["status"] == "active" else []}
+
+                if xr["status"] != "active":
+                    XRAY_IP_STRIKES.pop(x_uuid, None)
+                    continue
+
+                x_reason = None
+                if xr["expiry"] and xr["expiry"] < today:
+                    x_reason = f"Xray client `{x_uname}` ({x_proto.upper()}) expired ({xr['expiry']})"
+                elif x_gb > 0 and x_used >= int(x_gb * 1073741824):
+                    x_reason = f"Xray client `{x_uname}` ({x_proto.upper()}) reached {x_gb} GB quota"
+                elif x_iplim > 0 and active_count > x_iplim:
+                    XRAY_IP_STRIKES[x_uuid] = XRAY_IP_STRIKES.get(x_uuid, 0) + 1
+                    if XRAY_IP_STRIKES[x_uuid] >= 3:
+                        x_reason = f"Xray client `{x_uname}` ({x_proto.upper()}) exceeded user limit ({active_count}/{x_iplim} Users) — auto-disabled"
+                else:
+                    XRAY_IP_STRIKES.pop(x_uuid, None)
+
+                if x_reason:
+                    XRAY_IP_STRIKES.pop(x_uuid, None)
+                    conn.execute("UPDATE xray_users SET status = 'disabled' WHERE uuid = ?", (x_uuid,))
+                    conn.execute(
+                        "INSERT INTO audit_log (created_at, actor, action, detail, ip) VALUES (?, 'alyan-guard', 'xray_disable', ?, 'local')",
+                        (dt.datetime.now().strftime("%H:%M:%S"), x_reason),
+                    )
+                    xray_live[x_uuid] = {"online": 0, "ips": []}
+                    XRAY_ACTIVE_SESSIONS.pop(x_email, None)
+                    xray_resync_needed = True
+                    send_telegram_alert(bot_cfg, x_reason)
+
+            if xray_resync_needed:
+                subprocess.run(["/usr/local/bin/alyan-ctl", "--actor", "cli", "xray-sync"], stderr=subprocess.DEVNULL)
+
         conn.commit()
     finally:
         conn.close()
@@ -631,6 +763,7 @@ def enforce_cycle():
         "hist": HIST,
         "services": CACHED_SERVICES,
         "ssh_live": ssh_live,
+        "xray_live": xray_live,
     }
     tmp = LIVE_OUT.with_suffix(".tmp")
     tmp.write_text(json.dumps(snapshot), encoding="utf-8")
