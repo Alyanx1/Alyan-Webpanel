@@ -12,7 +12,7 @@ server {
     server_name {{DOMAIN}} _;
 
     access_log off;
-    reset_timedout_and_closed_connections on;
+    reset_timedout_connection on;
 
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
