@@ -604,7 +604,7 @@
   }
 
   /* ─── UI Shell & Helpers ─── */
-  const STATE = { bay: 'core', me: null, cfg: null, searchSsh: '', searchAudit: '', timer: null };
+  const STATE = { bay: 'core', me: null, cfg: null, searchSsh: '', searchXray: '', searchAudit: '', xrayProto: 'vless', timer: null };
 
   function toast(msg, kind = 'ok') {
     const el = document.createElement('div');
@@ -1098,62 +1098,78 @@
     let items = [];
     let xrayBusy = false;
     const protos = ['vless', 'vmess', 'trojan'];
+    if (!STATE.xrayProto || !protos.includes(STATE.xrayProto)) {
+      STATE.xrayProto = 'vless';
+    }
+    if (typeof STATE.searchXray !== 'string') {
+      STATE.searchXray = '';
+    }
     const isViewer = STATE.me && STATE.me.role === 'viewer';
 
     const xraySheetHtml = (liveIps) => liveIps.length
       ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Client IP</th></tr></thead><tbody>${liveIps.map(r => `<tr><td><b>${esc(r.user)}</b></td><td>${esc(r.proto)}</td><td>${esc(r.ip)}</td></tr>`).join('')}</tbody></table></div>`
       : `<div class="empty"><p>No active VLESS, VMess or Trojan sessions right now.</p></div>`;
 
-    const initData = await api('/xray');
+    let initData = {};
+    try {
+      initData = await api('/xray');
+    } catch (err) {
+      toast(err.message || 'Failed to load Xray accounts', 'err');
+    }
     items = initData.items || [];
-    STATE.cfg = initData.cfg; syncHud();
+    if (initData.cfg) {
+      STATE.cfg = initData.cfg;
+      syncHud();
+    }
 
     const getLiveIps = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto)
-      .flatMap(u => (u.ips || []).map((ip, idx) => ({ user: `${u.username} (S${idx + 1})`, proto: u.proto.toUpperCase(), ip })));
+      .filter(u => u.status !== 'disabled' && u.proto === (STATE.xrayProto || 'vless'))
+      .flatMap((u, idx) => (u.ips || []).map((ip, idx) => ({ user: `${u.username} (S${idx + 1})`, proto: (u.proto || 'vless').toUpperCase(), ip })));
 
     const getXrayLiveUsersTotal = () => items
-      .filter(u => u.proto === STATE.xrayProto)
+      .filter(u => u.proto === (STATE.xrayProto || 'vless'))
       .reduce((acc, u) => acc + (u.status === 'disabled' ? 0 : (Number(u.online) || (u.ips || []).length || 0)), 0);
     const getXrayLiveUsersList = () => items
-      .filter(u => u.status !== 'disabled' && u.proto === STATE.xrayProto && (Number(u.online) > 0 || (u.ips && u.ips.length > 0)))
+      .filter(u => u.status !== 'disabled' && u.proto === (STATE.xrayProto || 'vless') && (Number(u.online) > 0 || (u.ips && u.ips.length > 0)))
       .map(u => ({
         user: u.username,
-        proto: u.proto.toUpperCase(),
+        proto: (u.proto || 'vless').toUpperCase(),
         online: Number(u.online) || (u.ips || []).length || 0,
         limit: u.ip_limit > 0 ? `${u.ip_limit} Users` : 'Unlimited'
       }));
 
     const xrayUsersSheetHtml = (usersList) => usersList.length
       ? `<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Protocol</th><th>Live Users (Active Sessions)</th><th>User Limit</th></tr></thead><tbody>${usersList.map(r => `<tr><td><b>${esc(r.user)}</b></td><td><b>${esc(r.proto)}</b></td><td><span class="pill lit"><i class="dot lit"></i>${r.online} Active</span></td><td>${r.limit}</td></tr>`).join('')}</tbody></table></div>`
-      : `<div class="empty"><p>No active ${STATE.xrayProto.toUpperCase()} user sessions right now.</p></div>`;
+      : `<div class="empty"><p>No active ${(STATE.xrayProto || 'vless').toUpperCase()} user sessions right now.</p></div>`;
 
     const syncBayHeader = () => {
+      const curP = (STATE.xrayProto || 'vless').toUpperCase();
       setBayHead(
         'XRAY CORE',
-        'Xray',
+        'Xray Accounts',
         'Zero-downtime VLESS · VMess · Trojan over WS, gRPC & XHTTP on 80 / 443',
         isViewer ? '' : `
          <button class="btn sm" id="btnXrayLiveIps">${ic('wifi')}<span id="btnXrayLiveIpsTxt">Connected IPs (${getLiveIps().length})</span></button>
          <button class="btn sm" id="btnXrayLiveUsers">${ic('user')}<span id="btnXrayLiveUsersTxt">Live Users (${getXrayLiveUsersTotal()})</span></button>
-         <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${STATE.xrayProto.toUpperCase()}</span></button>`
+         <button class="btn btn-flame sm" id="btnAddXray">${ic('plus')}<span>Create ${curP}</span></button>`
       );
       if (!isViewer) {
-        const btnAdd = $('#btnAddXray'); if (btnAdd) btnAdd.onclick = () => openXrayForm(STATE.xrayProto);
+        const btnAdd = $('#btnAddXray'); if (btnAdd) btnAdd.onclick = () => openXrayForm(STATE.xrayProto || 'vless');
         const btnLive = $('#btnXrayLiveIps'); if (btnLive) btnLive.onclick = () => openSheet('Live Connected Xray IPs', 'REAL-IP CORRELATOR · LIVE 2S', `<div id="xrayLiveSheetBody">${xraySheetHtml(getLiveIps())}</div>`);
-        const btnXUsers = $('#btnXrayLiveUsers'); if (btnXUsers) btnXUsers.onclick = () => openSheet(`Live Connected ${STATE.xrayProto.toUpperCase()} Users`, 'REAL-TIME ACTIVE SESSIONS · LIVE 2S', `<div id="xrayUsersSheetBody">${xrayUsersSheetHtml(getXrayLiveUsersList())}</div>`);
+        const btnXUsers = $('#btnXrayLiveUsers'); if (btnXUsers) btnXUsers.onclick = () => openSheet(`Live Connected ${curP} Users`, 'REAL-TIME ACTIVE SESSIONS · LIVE 2S', `<div id="xrayUsersSheetBody">${xrayUsersSheetHtml(getXrayLiveUsersList())}</div>`);
       }
     };
     syncBayHeader();
 
-    const pIdxInit = protos.indexOf(STATE.xrayProto);
+    const curP = (STATE.xrayProto || 'vless').toUpperCase();
+    const pIdxInit = Math.max(0, protos.indexOf(STATE.xrayProto || 'vless'));
     $('#view').innerHTML = `
       <div class="toolbar">
         <div class="seg" id="xraySeg">
           <span class="seg-ind" id="xraySegInd" style="left:calc(${pIdxInit * 33.333}% + 4px);width:calc(33.333% - 8px)"></span>
-          ${protos.map(p => `<button type="button" class="${p === STATE.xrayProto ? 'on' : ''}" data-xp="${p}">${p.toUpperCase()}</button>`).join('')}
+          ${protos.map(p => `<button type="button" class="${p === (STATE.xrayProto || 'vless') ? 'on' : ''}" data-xp="${p}">${p.toUpperCase()}</button>`).join('')}
         </div>
-        <div class="search">${ic('search')}<input id="xraySearch" placeholder="Search ${STATE.xrayProto.toUpperCase()} client…" value="${esc(STATE.searchXray)}"/></div>
+        <div class="search">${ic('search')}<input id="xraySearch" placeholder="Search ${curP} client…" value="${esc(STATE.searchXray || '')}"/></div>
         <span class="live" id="xrayLiveMeta"><i class="dot lit"></i> 0 clients · live 2s</span>
       </div>
       <div id="xrayCardsHost"></div>`;
@@ -1171,11 +1187,13 @@
       const openXrayUsersModalBody = $('#xrayUsersSheetBody');
       if (openXrayUsersModalBody) openXrayUsersModalBody.innerHTML = xrayUsersSheetHtml(getXrayLiveUsersList());
 
-      const protoAll = items.filter(u => u.proto === STATE.xrayProto);
+      const curP = (STATE.xrayProto || 'vless').toUpperCase();
+      const protoAll = items.filter(u => u.proto === (STATE.xrayProto || 'vless'));
       const liveMeta = $('#xrayLiveMeta');
       if (liveMeta) liveMeta.innerHTML = `<i class="dot lit"></i> ${protoAll.length} clients · live 2s`;
 
-      const list = protoAll.filter(u => u.username.toLowerCase().includes(STATE.searchXray.toLowerCase()));
+      const q = (STATE.searchXray || '').toLowerCase();
+      const list = protoAll.filter(u => (u.username || '').toLowerCase().includes(q));
       const renderKey = list.map(u => `${u.uuid}:${u.status}:${u.online}:${u.used_bytes}:${(u.ips||[]).join(',')}`).join('|');
       if (host._lastRenderKey === renderKey) return;
       host._lastRenderKey = renderKey;
@@ -1231,7 +1249,7 @@
             <button class="icon-btn sm danger" title="Delete" data-xdel="${esc(u.uuid)}">${ic('trash')}</button>
           </div>
         </article>`;
-      }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${STATE.xrayProto.toUpperCase()} accounts yet. Click Create above.</p></div>`;
+      }).join('')}</div>` : `<div class="mod empty">${ic('bolt')}<p>No ${curP} accounts yet. Click Create above.</p></div>`;
 
       if (!isViewer) {
         $$('[data-cpuuid]', host).forEach(el => { el.onclick = () => copyText(el.dataset.cpuuid, 'UUID copied'); });
