@@ -1031,7 +1031,7 @@
         STATE.cfg = res.cfg;
         paintCards();
       } catch {} finally { sshBusy = false; }
-    }, 1000);
+    }, 500);
   }
 
   function showSshTicket(u) {
@@ -1309,7 +1309,7 @@
         STATE.cfg = res.cfg;
         paintXrayCards();
       } catch {} finally { xrayBusy = false; }
-    }, 1000);
+    }, 500);
   }
 
   function showXrayLinks(u) {

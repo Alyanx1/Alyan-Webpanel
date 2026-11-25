@@ -22,6 +22,7 @@ STATIC_DIR = BASE_DIR / "static"
 SESSION_FILE = BASE_DIR / ".alyan_sessions.json"
 SECRET_FILE = BASE_DIR / ".alyan_secret.key"
 CTL_BIN = "/usr/local/bin/alyan-ctl"
+LIVE_SNAP_FILE = Path("/run/alyan-live.json")
 
 SESSION_TTL = 86400 * 7  # 7 days
 COOKIE_NAME = "alyan_sid"
@@ -31,9 +32,9 @@ LOGIN_FAILURES: dict[str, list[float]] = {}
 MAX_FAILURES = 8
 FAIL_WINDOW = 300.0
 
-# Lightweight read coalescing cache (1.2s TTL, cleared immediately on any mutation)
+# Lightweight read coalescing cache (DB list cached briefly; live telemetry always read fresh from /run/alyan-live.json)
 READ_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-READ_CACHE_TTL = 0.5
+READ_CACHE_TTL = 0.8
 
 
 def load_or_create_secret() -> bytes:
@@ -254,6 +255,36 @@ def invalidate_read_cache():
     READ_CACHE.clear()
 
 
+def read_live_snap() -> dict[str, Any]:
+    """Read the latest /run/alyan-live.json written by alyan-guard without subprocess overhead."""
+    try:
+        if LIVE_SNAP_FILE.exists():
+            return json.loads(LIVE_SNAP_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def overlay_live_items(data: dict[str, Any], snap_key: str, id_field: str, is_viewer: bool) -> dict[str, Any]:
+    """Merge zero-lag live online/ips state from /run/alyan-live.json onto cached account rows."""
+    snap = read_live_snap()
+    live_map = snap.get(snap_key)
+    if not isinstance(live_map, dict):
+        return data
+    items = []
+    for row in data.get("items", []):
+        r = dict(row)
+        if r.get("status") == "disabled" or is_viewer:
+            r["online"] = 0
+            r["ips"] = []
+        else:
+            live = live_map.get(r.get(id_field, ""), {})
+            r["online"] = int(live.get("online", 0))
+            r["ips"] = list(live.get("ips", []))
+        items.append(r)
+    return {**data, "items": items}
+
+
 # ─── Core & Telemetry Routes ─────────────────────────────────────────────────
 @app.get("/api/overview")
 async def api_overview(request: Request, sess: dict = Depends(require_session)):
@@ -268,7 +299,8 @@ async def api_telemetry(request: Request, sess: dict = Depends(require_session))
 # ─── SSH Accounts Routes ─────────────────────────────────────────────────────
 @app.get("/api/ssh")
 async def api_ssh_list(request: Request, sess: dict = Depends(require_session)):
-    return await cached_ctl_read(f"ssh:{sess['username']}", ["ssh-list"], sess["username"], client_ip(request))
+    data = await cached_ctl_read(f"ssh:{sess['username']}", ["ssh-list"], sess["username"], client_ip(request))
+    return overlay_live_items(data, "ssh_live", "username", sess.get("role") == "viewer")
 
 
 @app.post("/api/ssh")
@@ -312,7 +344,8 @@ async def api_ssh_delete(username: str, request: Request, sess: dict = Depends(r
 # ─── Xray Accounts Routes ────────────────────────────────────────────────────
 @app.get("/api/xray")
 async def api_xray_list(request: Request, sess: dict = Depends(require_session)):
-    return await cached_ctl_read(f"xray:{sess['username']}", ["xray-list"], sess["username"], client_ip(request))
+    data = await cached_ctl_read(f"xray:{sess['username']}", ["xray-list"], sess["username"], client_ip(request))
+    return overlay_live_items(data, "xray_live", "uuid", sess.get("role") == "viewer")
 
 
 @app.post("/api/xray")

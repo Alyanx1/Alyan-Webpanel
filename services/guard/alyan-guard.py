@@ -387,7 +387,7 @@ def read_pid_io_bytes(pid: int) -> int:
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
     auth_refreshed = False
-    if CYCLE_TICK == 1 or (CYCLE_TICK % 2 == 0):
+    if CYCLE_TICK == 1 or (CYCLE_TICK % 4 == 0):
         refresh_ssh_auth_cache()
         auth_refreshed = True
 
@@ -666,37 +666,38 @@ def enforce_cycle():
                 if proto_sockets.get(p, 0) == 0:
                     XRAY_ACTIVE_SESSIONS.pop(email, None)
 
-            try:
-                sq_out = subprocess.check_output(
-                    [str(XRAY_BIN), "api", "statsquery", "--server=127.0.0.1:10085", "-pattern=user>>>"],
-                    text=True, stderr=subprocess.DEVNULL, timeout=1.0
-                )
-                stats_list = json.loads(sq_out).get("stat", [])
-                user_totals: dict[str, int] = {}
-                for st in stats_list:
-                    s_name = st.get("name", "")
-                    m_stat = re.match(r"user>>>(.+?)>>>traffic>>>(uplink|downlink)", s_name)
-                    if m_stat:
-                        em = m_stat.group(1).lower()
-                        user_totals[em] = user_totals.get(em, 0) + int(st.get("value", 0))
+            if CYCLE_TICK == 1 or (CYCLE_TICK % 2 == 0):
+                try:
+                    sq_out = subprocess.check_output(
+                        [str(XRAY_BIN), "api", "statsquery", "--server=127.0.0.1:10085", "-pattern=user>>>"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=1.0
+                    )
+                    stats_list = json.loads(sq_out).get("stat", [])
+                    user_totals: dict[str, int] = {}
+                    for st in stats_list:
+                        s_name = st.get("name", "")
+                        m_stat = re.match(r"user>>>(.+?)>>>traffic>>>(uplink|downlink)", s_name)
+                        if m_stat:
+                            em = m_stat.group(1).lower()
+                            user_totals[em] = user_totals.get(em, 0) + int(st.get("value", 0))
 
-                for em, total_b in user_totals.items():
-                    prev_b = XRAY_LAST_BYTES.get(em, total_b)
-                    delta_x = total_b - prev_b
-                    XRAY_LAST_BYTES[em] = total_b
-                    if delta_x > 0:
-                        if em in XRAY_ACTIVE_SESSIONS:
-                            XRAY_ACTIVE_SESSIONS[em]["last_seen"] = now_ts
-                            for cip in XRAY_ACTIVE_SESSIONS[em].get("ip_seen", {}):
-                                XRAY_ACTIVE_SESSIONS[em]["ip_seen"][cip] = now_ts
-                        if "@" in em:
-                            x_user, x_proto = em.split("@", 1)
-                            conn.execute(
-                                "UPDATE xray_users SET used_bytes = used_bytes + ? WHERE LOWER(username) = LOWER(?) AND proto = ?",
-                                (delta_x, x_user, x_proto),
-                            )
-            except Exception:
-                pass
+                    for em, total_b in user_totals.items():
+                        prev_b = XRAY_LAST_BYTES.get(em, total_b)
+                        delta_x = total_b - prev_b
+                        XRAY_LAST_BYTES[em] = total_b
+                        if delta_x > 0:
+                            if em in XRAY_ACTIVE_SESSIONS:
+                                XRAY_ACTIVE_SESSIONS[em]["last_seen"] = now_ts
+                                for cip in XRAY_ACTIVE_SESSIONS[em].get("ip_seen", {}):
+                                    XRAY_ACTIVE_SESSIONS[em]["ip_seen"][cip] = now_ts
+                            if "@" in em:
+                                x_user, x_proto = em.split("@", 1)
+                                conn.execute(
+                                    "UPDATE xray_users SET used_bytes = used_bytes + ? WHERE LOWER(username) = LOWER(?) AND proto = ?",
+                                    (delta_x, x_user, x_proto),
+                                )
+                except Exception:
+                    pass
 
             # Expire individual stale IPs (idle for > 20s) and idle shared sessions (> 20s)
             for email in list(XRAY_ACTIVE_SESSIONS.keys()):
@@ -721,25 +722,28 @@ def enforce_cycle():
                 active_ips = sorted(ip_map.keys(), key=lambda k: ip_map[k], reverse=True)
 
                 # Carrier Subnet Clustering:
-                # Group active IPs by /16 for IPv4 and /64 for IPv6.
-                # In cellular CGNAT networks (e.g. Ufone 4G), parallel video/web streams from
-                # a single mobile device frequently route via 2+ IPs in the same /16 carrier pool.
-                cluster_keys = set()
+                # Group active IPs by /16 for IPv4 and /64 for IPv6, keeping the newest active IP per cluster.
+                # In cellular CGNAT networks (e.g. Ufone 4G), parallel streams from a single mobile
+                # device frequently route via 2+ IPs in the same /16 carrier pool.
+                clusters: dict[str, str] = {}
                 for ip_str in active_ips:
                     try:
                         ip_obj = ipaddress.ip_address(ip_str)
                         if ip_obj.version == 4:
                             net = ipaddress.IPv4Network(f"{ip_str}/16", strict=False)
-                            cluster_keys.add(str(net.network_address))
+                            ckey = str(net.network_address)
                         else:
                             net = ipaddress.IPv6Network(f"{ip_str}/64", strict=False)
-                            cluster_keys.add(str(net.network_address))
+                            ckey = str(net.network_address)
                     except Exception:
-                        cluster_keys.add(ip_str)
+                        ckey = ip_str
+                    if ckey not in clusters:
+                        clusters[ckey] = ip_str
 
-                active_count = len(cluster_keys)
+                active_count = len(clusters)
+                cluster_ips = list(clusters.values())
 
-                xray_live[x_uuid] = {"online": active_count if xr["status"] == "active" else 0, "ips": active_ips if xr["status"] == "active" else []}
+                xray_live[x_uuid] = {"online": active_count if xr["status"] == "active" else 0, "ips": cluster_ips if xr["status"] == "active" else []}
 
                 if xr["status"] != "active":
                     XRAY_IP_STRIKES.pop(x_uuid, None)
@@ -786,7 +790,7 @@ def enforce_cycle():
     HIST["rx"] = (HIST["rx"] + [round((rx_bps * 8) / 1048576.0, 2)])[-20:]
     HIST["tx"] = (HIST["tx"] + [round((tx_bps * 8) / 1048576.0, 2)])[-20:]
 
-    if not CACHED_SERVICES or (CYCLE_TICK % 6 == 0):
+    if not CACHED_SERVICES or (CYCLE_TICK % 12 == 0):
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
@@ -821,7 +825,7 @@ def main():
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.25)
 
 
 if __name__ == "__main__":
