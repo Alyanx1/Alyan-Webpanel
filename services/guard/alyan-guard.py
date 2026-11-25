@@ -61,7 +61,8 @@ XRAY_RECENT_IPS: dict[str, dict[str, list[float]]] = {}
 XRAY_LAST_BYTES: dict[str, int] = {}
 XRAY_IP_STRIKES: dict[str, int] = {}
 
-ONLINE_WINDOW = 10.0      # 10s: Snappy offline detection without flapping
+ONLINE_WINDOW = 6.0       # 6.0s: Snappy ~8s disconnect detection without flapping
+ACCEPT_WINDOW = 2.0       # 2.0s: Secondary device active accept window
 RETAIN_WINDOW = 600.0     # Retain newest IP up to 10m so idle tunnels recover instantly
 
 XRAY_LINE_RE = re.compile(
@@ -728,14 +729,15 @@ def enforce_cycle():
                     pass
 
             # 2c. ZetaVPN Refresh: Refresh ONLY newest IP or actively-connecting IPs!
-            # Disconnected IPs whose last_accept is older than keep_start DO NOT get refreshed!
+            # Disconnected secondary IPs whose last_accept is older than ACCEPT_WINDOW DO NOT get refreshed!
+            accept_thresh = now_ts - ACCEPT_WINDOW
             for email in active_emails:
                 ips = XRAY_RECENT_IPS.get(email)
                 if not ips:
                     continue
                 newest = max(ips, key=lambda i: ips[i][0])
                 for ip, ts in ips.items():
-                    if ip == newest or ts[0] >= keep_start:
+                    if ip == newest or ts[0] >= accept_thresh:
                         ts[1] = now_ts  # refresh last_seen (badge) only, NOT last_accept
 
             # 2d. Prune expired IPs
