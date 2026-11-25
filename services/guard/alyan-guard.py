@@ -49,10 +49,7 @@ PID_LAST_IO_BYTES: dict[int, int] = {}
 SSH_IP_STRIKES: dict[str, int] = {}
 
 XRAY_BIN = Path("/usr/local/bin/xray")
-XRAY_ACCESS_LOG = Path("/var/log/xray/access.log")
-XRAY_LAST_LOG_POS = 0
 XRAY_LAST_BYTES: dict[str, int] = {}
-XRAY_ACTIVE_SESSIONS: dict[str, dict] = {}
 XRAY_IP_STRIKES: dict[str, int] = {}
 
 DROPBEAR_AUTH_RE = re.compile(
@@ -604,73 +601,40 @@ def enforce_cycle():
                 ssh_sessions[uname] = []
                 send_telegram_alert(bot_cfg, reason)
 
-        # ─── 2. Scan Xray Live Sessions & Byte Counters ─────────────────────
+        # ─── 2. Scan Xray Live Sessions & Byte Counters (Native Xray In-Memory API) ─
         xray_rows = conn.execute("SELECT * FROM xray_users").fetchall()
         xray_resync_needed = False
         xray_live: dict[str, dict] = {}
 
         if xray_rows and XRAY_BIN.exists():
-            now_ts = time.time()
-            proto_sockets = {"vless": 0, "vmess": 0, "trojan": 0}
+            # 2a. Real-Time Online Users & Active IPs direct from Xray's Memory Map
+            online_by_email: dict[str, list[str]] = {}
             try:
-                ss_chk = subprocess.check_output(
-                    ["ss", "-tHn", "state", "established", "( sport = :20001 or sport = :20002 or sport = :20003 or sport = :20004 or sport = :20005 )"],
-                    text=True, stderr=subprocess.DEVNULL, timeout=1.0
+                raw_online = subprocess.check_output(
+                    [str(XRAY_BIN), "api", "statsonlineiplist", "--server=127.0.0.1:10085", "-all", "-include-traffic"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=1.5
                 )
-                for ln in ss_chk.splitlines():
-                    if ":20001" in ln or ":20004" in ln or ":20005" in ln:
-                        proto_sockets["vless"] += 1
-                    elif ":20002" in ln:
-                        proto_sockets["vmess"] += 1
-                    elif ":20003" in ln:
-                        proto_sockets["trojan"] += 1
+                online_data = json.loads(raw_online)
+                for u in online_data.get("users", []):
+                    em = (u.get("email") or "").strip().lower()
+                    if not em:
+                        continue
+                    clean_ips = []
+                    for item in u.get("ips", []):
+                        raw_ip = item.get("ip", "") if isinstance(item, dict) else str(item)
+                        cip = clean_public_ip(raw_ip)
+                        if cip and cip not in clean_ips:
+                            clean_ips.append(cip)
+                    online_by_email[em] = clean_ips
             except Exception:
                 pass
 
-            if XRAY_ACCESS_LOG.exists():
-                global XRAY_LAST_LOG_POS
-                try:
-                    fsize = XRAY_ACCESS_LOG.stat().st_size
-                    if fsize < XRAY_LAST_LOG_POS:
-                        XRAY_LAST_LOG_POS = 0
-                    if fsize > XRAY_LAST_LOG_POS:
-                        with open(XRAY_ACCESS_LOG, "r", encoding="utf-8", errors="ignore") as f:
-                            f.seek(XRAY_LAST_LOG_POS)
-                            for line in f:
-                                m_acc = re.search(r"from\s+([^\s:]+)(?::\d+)?\s+accepted.*?email:\s*(\S+)", line)
-                                if m_acc:
-                                    raw_ip, email = m_acc.group(1), m_acc.group(2).lower()
-                                    clean_ip = clean_public_ip(raw_ip)
-                                    if clean_ip:
-                                        p_match = "vless"
-                                        if "@" in email:
-                                            p_match = email.split("@", 1)[1]
-                                        if email not in XRAY_ACTIVE_SESSIONS:
-                                            XRAY_ACTIVE_SESSIONS[email] = {
-                                                "proto": p_match,
-                                                "ip_seen": {},
-                                                "last_seen": now_ts,
-                                            }
-                                        XRAY_ACTIVE_SESSIONS[email]["proto"] = p_match
-                                        if "ip_seen" not in XRAY_ACTIVE_SESSIONS[email]:
-                                            XRAY_ACTIVE_SESSIONS[email]["ip_seen"] = {}
-                                        XRAY_ACTIVE_SESSIONS[email]["ip_seen"][clean_ip] = now_ts
-                                        XRAY_ACTIVE_SESSIONS[email]["last_seen"] = now_ts
-                            XRAY_LAST_LOG_POS = f.tell()
-                except Exception:
-                    pass
-
-            # Fast teardown: If a protocol has 0 established sockets, immediately evict its sessions
-            for email in list(XRAY_ACTIVE_SESSIONS.keys()):
-                p = XRAY_ACTIVE_SESSIONS[email].get("proto", "vless")
-                if proto_sockets.get(p, 0) == 0:
-                    XRAY_ACTIVE_SESSIONS.pop(email, None)
-
+            # 2b. Cumulative Byte Counters via statsquery (recorded into SQLite)
             if CYCLE_TICK == 1 or (CYCLE_TICK % 2 == 0):
                 try:
                     sq_out = subprocess.check_output(
-                        [str(XRAY_BIN), "api", "statsquery", "--server=127.0.0.1:10085", "-pattern=user>>>"],
-                        text=True, stderr=subprocess.DEVNULL, timeout=1.0
+                        [str(XRAY_BIN), "api", "statsquery", "--server=127.0.0.1:10085"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=1.5
                     )
                     stats_list = json.loads(sq_out).get("stat", [])
                     user_totals: dict[str, int] = {}
@@ -685,29 +649,16 @@ def enforce_cycle():
                         prev_b = XRAY_LAST_BYTES.get(em, total_b)
                         delta_x = total_b - prev_b
                         XRAY_LAST_BYTES[em] = total_b
-                        if delta_x > 0:
-                            if em in XRAY_ACTIVE_SESSIONS:
-                                XRAY_ACTIVE_SESSIONS[em]["last_seen"] = now_ts
-                                for cip in XRAY_ACTIVE_SESSIONS[em].get("ip_seen", {}):
-                                    XRAY_ACTIVE_SESSIONS[em]["ip_seen"][cip] = now_ts
-                            if "@" in em:
-                                x_user, x_proto = em.split("@", 1)
-                                conn.execute(
-                                    "UPDATE xray_users SET used_bytes = used_bytes + ? WHERE LOWER(username) = LOWER(?) AND proto = ?",
-                                    (delta_x, x_user, x_proto),
-                                )
+                        if delta_x > 0 and "@" in em:
+                            x_user, x_proto = em.split("@", 1)
+                            conn.execute(
+                                "UPDATE xray_users SET used_bytes = used_bytes + ? WHERE LOWER(username) = LOWER(?) AND proto = ?",
+                                (delta_x, x_user, x_proto),
+                            )
                 except Exception:
                     pass
 
-            # Expire individual stale IPs (idle for > 20s) and idle shared sessions (> 20s)
-            for email in list(XRAY_ACTIVE_SESSIONS.keys()):
-                sess = XRAY_ACTIVE_SESSIONS[email]
-                ip_seen = sess.get("ip_seen", {})
-                active_ips_map = {ip: t for ip, t in ip_seen.items() if (now_ts - t) <= 20.0}
-                sess["ip_seen"] = active_ips_map
-                if not active_ips_map or (now_ts - sess.get("last_seen", 0)) > 20.0:
-                    XRAY_ACTIVE_SESSIONS.pop(email, None)
-
+            # 2c. Enforce Expiry, Quota & IP Limits with Carrier Subnet Clustering
             for xr in xray_rows:
                 x_uuid = xr["uuid"]
                 x_uname = xr["username"]
@@ -717,16 +668,14 @@ def enforce_cycle():
                 x_gb = float(xr["gb_limit"] or 0)
                 x_iplim = int(xr["ip_limit"] or 0)
 
-                sess = XRAY_ACTIVE_SESSIONS.get(x_email, {})
-                ip_map = sess.get("ip_seen", {})
-                active_ips = sorted(ip_map.keys(), key=lambda k: ip_map[k], reverse=True)
+                active_raw_ips = online_by_email.get(x_email, [])
 
                 # Carrier Subnet Clustering:
-                # Group active IPs by /16 for IPv4 and /64 for IPv6, keeping the newest active IP per cluster.
-                # In cellular CGNAT networks (e.g. Ufone 4G), parallel streams from a single mobile
+                # Group active IPs by /16 for IPv4 and /64 for IPv6.
+                # In cellular CGNAT networks (e.g. Ufone, Jazz, Zong), parallel streams from a single mobile
                 # device frequently route via 2+ IPs in the same /16 carrier pool.
                 clusters: dict[str, str] = {}
-                for ip_str in active_ips:
+                for ip_str in active_raw_ips:
                     try:
                         ip_obj = ipaddress.ip_address(ip_str)
                         if ip_obj.version == 4:
@@ -743,9 +692,13 @@ def enforce_cycle():
                 active_count = len(clusters)
                 cluster_ips = list(clusters.values())
 
-                xray_live[x_uuid] = {"online": active_count if xr["status"] == "active" else 0, "ips": cluster_ips if xr["status"] == "active" else []}
+                is_active = (xr["status"] == "active")
+                xray_live[x_uuid] = {
+                    "online": active_count if is_active else 0,
+                    "ips": cluster_ips if is_active else [],
+                }
 
-                if xr["status"] != "active":
+                if not is_active:
                     XRAY_IP_STRIKES.pop(x_uuid, None)
                     continue
 
@@ -769,7 +722,7 @@ def enforce_cycle():
                         (dt.datetime.now().strftime("%H:%M:%S"), x_reason),
                     )
                     xray_live[x_uuid] = {"online": 0, "ips": []}
-                    XRAY_ACTIVE_SESSIONS.pop(x_email, None)
+                    online_by_email.pop(x_email, None)
                     xray_resync_needed = True
                     send_telegram_alert(bot_cfg, x_reason)
 
@@ -825,7 +778,7 @@ def main():
             enforce_cycle()
         except Exception:
             pass
-        time.sleep(0.25)
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
