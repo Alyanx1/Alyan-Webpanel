@@ -47,14 +47,15 @@ RESERVED_USERS = {
 }
 
 MANAGED_SERVICES = [
-    ("haproxy",     "HAProxy Flame Router", "Public 80 / 443 Multiplexer"),
-    ("nginx",       "Nginx Router & TLS",   "WS / gRPC / Panel HTTPS"),
-    ("dropbear",    "Dropbear SSH",         "Direct Tunnel Ports 109 / 143"),
-    ("alyan-wsd",   "Alyan WS-Proxy",       "GET /alyan 101 + Real-IP Bridge"),
-    ("xray",        "Xray-Core Multi-Engine", "VLESS · VMess · Trojan · XHTTP"),
-    ("alyan-guard", "Alyan Guard",          "GB Quota · Expiry · IP Enforcer"),
-    ("alyan-bot",   "Telegram Bot",         "Full User & Server Control"),
-    ("alyan-panel", "Alyan Webpanel",       "FastAPI Command Deck"),
+    ("haproxy",           "HAProxy Flame Router", "Public 80 / 443 Multiplexer"),
+    ("nginx",             "Nginx Router & TLS",   "WS / gRPC / Panel HTTPS"),
+    ("dropbear",          "Dropbear SSH",         "Direct Tunnel Ports 109 / 143"),
+    ("alyan-wsd",         "Alyan WS-Proxy",       "GET /alyan 101 + Real-IP Bridge"),
+    ("alyan-xray-bridge", "Alyan Xray Bridge",    "1-2s Real-Time Socket Tracker"),
+    ("xray",              "Xray-Core Multi-Engine", "VLESS · VMess · Trojan · XHTTP"),
+    ("alyan-guard",       "Alyan Guard",          "GB Quota · Expiry · IP Enforcer"),
+    ("alyan-bot",         "Telegram Bot",         "Full User & Server Control"),
+    ("alyan-panel",       "Alyan Webpanel",       "FastAPI Command Deck"),
 ]
 
 

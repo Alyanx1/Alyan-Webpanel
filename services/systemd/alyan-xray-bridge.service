@@ -1,0 +1,15 @@
+[Unit]
+Description=Alyan Xray Real-Time Socket Bridge
+After=network.target nginx.service xray.service
+Wants=xray.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/alyan/bin/alyan-xray-bridge 127.0.0.1:8885 /run/alyan-xray-sessions.json
+Restart=always
+RestartSec=1s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

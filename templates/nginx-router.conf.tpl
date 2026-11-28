@@ -22,9 +22,9 @@ server {
         default_type "text/plain";
     }
 
-    # ─── Xray VLESS WebSocket ────────────────────────────────────────────────
+    # ─── Xray VLESS WebSocket (via Alyan Real-Time Socket Bridge) ─────────────
     location /alyan-vless {
-        proxy_pass http://127.0.0.1:20001;
+        proxy_pass http://127.0.0.1:8885;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -38,9 +38,9 @@ server {
         proxy_ignore_client_abort off;
     }
 
-    # ─── Xray VMess WebSocket ────────────────────────────────────────────────
+    # ─── Xray VMess WebSocket (via Alyan Real-Time Socket Bridge) ─────────────
     location /alyan-vmess {
-        proxy_pass http://127.0.0.1:20002;
+        proxy_pass http://127.0.0.1:8885;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -54,9 +54,9 @@ server {
         proxy_ignore_client_abort off;
     }
 
-    # ─── Xray Trojan WebSocket ───────────────────────────────────────────────
+    # ─── Xray Trojan WebSocket (via Alyan Real-Time Socket Bridge) ────────────
     location /alyan-trojan {
-        proxy_pass http://127.0.0.1:20003;
+        proxy_pass http://127.0.0.1:8885;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -70,9 +70,9 @@ server {
         proxy_ignore_client_abort off;
     }
 
-    # ─── Xray VLESS XHTTP ────────────────────────────────────────────────────
+    # ─── Xray VLESS XHTTP (via Alyan Real-Time Socket Bridge) ─────────────────
     location /alyan-xhttp {
-        proxy_pass http://127.0.0.1:20004;
+        proxy_pass http://127.0.0.1:8885;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $client_real_ip;
