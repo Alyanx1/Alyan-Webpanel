@@ -16,7 +16,7 @@
       "0": {
         "statsUserUplink": true,
         "statsUserDownlink": true,
-        "connIdle": 300,
+        "connIdle": 30,
         "bufferSize": 1024,
         "uplinkOnly": 15,
         "downlinkOnly": 30,
@@ -50,7 +50,8 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vless"
+          "path": "/alyan-vless",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "trustedXForwardedFor": ["CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"]
@@ -68,7 +69,8 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-vmess"
+          "path": "/alyan-vmess",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "trustedXForwardedFor": ["CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"]
@@ -86,7 +88,8 @@
       "streamSettings": {
         "network": "ws",
         "wsSettings": {
-          "path": "/alyan-trojan"
+          "path": "/alyan-trojan",
+          "heartbeatPeriod": 2
         },
         "sockopt": {
           "trustedXForwardedFor": ["CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP"]

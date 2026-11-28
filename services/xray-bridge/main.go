@@ -148,10 +148,13 @@ func tuneTCP(c net.Conn) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetKeepAlive(true)
-		_ = tc.SetKeepAlivePeriod(10 * time.Second)
+		_ = tc.SetKeepAlivePeriod(3 * time.Second)
 		if rc, err := tc.SyscallConn(); err == nil {
 			_ = rc.Control(func(fd uintptr) {
 				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 6, 3)      // TCP_KEEPCNT = 3
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 5, 2)      // TCP_KEEPINTVL = 2
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 18, 8000) // TCP_USER_TIMEOUT = 8s
 			})
 		}
 	}
