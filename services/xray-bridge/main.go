@@ -26,6 +26,7 @@ type SessionEntry struct {
 	Bytes  int64  `json:"bytes"`
 	Open   bool   `json:"open"`
 	Ts     int64  `json:"ts"`
+	UpTs   int64  `json:"upts"`
 }
 
 var sessionMap sync.Map
@@ -33,8 +34,27 @@ var mapDirty = make(chan struct{}, 1)
 var stateFile = "/run/alyan-xray-sessions.json"
 
 type byteCounter struct {
-	w     io.Writer
-	entry *SessionEntry
+	w        io.Writer
+	entry    *SessionEntry
+	isUplink bool
+}
+
+type timeoutReader struct {
+	r          io.Reader
+	c          net.Conn
+	timeout    time.Duration
+	onActivity func(n int)
+}
+
+func (tr *timeoutReader) Read(p []byte) (int, error) {
+	if tr.timeout > 0 && tr.c != nil {
+		_ = tr.c.SetReadDeadline(time.Now().Add(tr.timeout))
+	}
+	n, err := tr.r.Read(p)
+	if n > 0 && tr.onActivity != nil {
+		tr.onActivity(n)
+	}
+	return n, err
 }
 
 var bufPool = sync.Pool{
@@ -54,7 +74,11 @@ func (bc *byteCounter) Write(p []byte) (int, error) {
 	n, err := bc.w.Write(p)
 	if n > 0 && bc.entry != nil {
 		atomic.AddInt64(&bc.entry.Bytes, int64(n))
-		atomic.StoreInt64(&bc.entry.Ts, time.Now().Unix())
+		now := time.Now().Unix()
+		atomic.StoreInt64(&bc.entry.Ts, now)
+		if bc.isUplink {
+			atomic.StoreInt64(&bc.entry.UpTs, now)
+		}
 	}
 	return n, err
 }
@@ -85,6 +109,11 @@ func flushState() {
 	sessionMap.Range(func(k, v interface{}) bool {
 		se := v.(*SessionEntry)
 		if se.Open {
+			upts := atomic.LoadInt64(&se.UpTs)
+			// If client has had no uplink traffic/pong for > 4s, omit from active telemetry!
+			if upts > 0 && (now-upts > 4) {
+				return true
+			}
 			activeEntries = append(activeEntries, se)
 		}
 		return true
@@ -119,6 +148,7 @@ func flushState() {
 			Bytes:  b,
 			Open:   true,
 			Ts:     atomic.LoadInt64(&se.Ts),
+			UpTs:   atomic.LoadInt64(&se.UpTs),
 		}
 	}
 
@@ -267,6 +297,7 @@ func handleClient(client net.Conn) {
 	sessionID := strings.ToLower(mode) + "-" + lport
 	subnet := getSubnet(realIP)
 
+	now := time.Now().Unix()
 	entry := &SessionEntry{
 		ID:     sessionID,
 		Port:   lport,
@@ -274,9 +305,10 @@ func handleClient(client net.Conn) {
 		Subnet: subnet,
 		Mode:   mode,
 		Path:   reqPath,
-		Bytes:  0,
+		Bytes:  int64(len(data)),
 		Open:   true,
-		Ts:     time.Now().Unix(),
+		Ts:     now,
+		UpTs:   now,
 	}
 	sessionMap.Store(lport, entry)
 	notifyDirty()
@@ -290,14 +322,25 @@ func handleClient(client net.Conn) {
 	// Forward initial handshake to Xray
 	_, _ = target.Write(data)
 
+	clientTr := &timeoutReader{
+		r:       client,
+		c:       client,
+		timeout: 5 * time.Second,
+		onActivity: func(n int) {
+			atomic.StoreInt64(&entry.UpTs, time.Now().Unix())
+		},
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = copyBuffer(&byteCounter{w: target, entry: entry}, client)
+		// Uplink: client -> target
+		_, _ = copyBuffer(&byteCounter{w: target, entry: entry, isUplink: true}, clientTr)
 		_ = target.Close()
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = copyBuffer(&byteCounter{w: client, entry: entry}, target)
+		// Downlink: target -> client
+		_, _ = copyBuffer(&byteCounter{w: client, entry: entry, isUplink: false}, target)
 		_ = client.Close()
 		done <- struct{}{}
 	}()

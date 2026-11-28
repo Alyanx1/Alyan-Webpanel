@@ -16,11 +16,11 @@
       "0": {
         "statsUserUplink": true,
         "statsUserDownlink": true,
-        "connIdle": 30,
-        "bufferSize": 1024,
-        "uplinkOnly": 15,
-        "downlinkOnly": 30,
-        "handshake": 10
+        "connIdle": 10,
+        "bufferSize": 512,
+        "uplinkOnly": 2,
+        "downlinkOnly": 4,
+        "handshake": 4
       }
     },
     "system": {

@@ -735,6 +735,10 @@ def enforce_cycle():
             for port_k, s_entry in bridge_sessions.items():
                 if not s_entry.get("open", True):
                     continue
+                # Discard if client has not sent any uplink/pong for > 4.5s
+                up_ts = float(s_entry.get("upts", 0) or s_entry.get("ts", 0) or 0)
+                if up_ts and (now_ts - up_ts > 4.5):
+                    continue
                 w_ip = clean_public_ip(s_entry.get("ip", ""))
                 if not w_ip:
                     continue

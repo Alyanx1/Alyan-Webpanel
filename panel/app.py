@@ -34,7 +34,7 @@ FAIL_WINDOW = 300.0
 
 # Lightweight read coalescing cache (DB list cached briefly; live telemetry always read fresh from /run/alyan-live.json)
 READ_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-READ_CACHE_TTL = 0.8
+READ_CACHE_TTL = 0.4
 
 
 def load_or_create_secret() -> bytes:

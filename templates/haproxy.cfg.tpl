@@ -54,7 +54,7 @@ frontend fe_http_80
 
 # ─── PUBLIC PORT 443 EDGE: Raw SSH vs TLS Multiplexer ────────────────────────
 frontend fe_edge_443
-    bind *:443
+    bind *:443 tcp-ut 10s
     mode tcp
     tcp-request inspect-delay 1s
 
