@@ -37,6 +37,7 @@ MANAGED_SERVICES = [
 
 HIST = {"cpu": [], "ram": [], "rx": [], "tx": []}
 LAST_CPU = None
+CPU_EMA = None
 LAST_NET = None
 CACHED_SERVICES: list[dict] = []
 CYCLE_TICK = 0
@@ -154,18 +155,25 @@ def clean_public_ip(raw_token: str) -> str | None:
 
 
 def read_cpu_pct() -> int:
-    global LAST_CPU
+    global LAST_CPU, CPU_EMA
     try:
         parts = [int(x) for x in Path("/proc/stat").read_text().splitlines()[0].split()[1:9]]
         idle = parts[3] + parts[4]
         total = sum(parts)
         if LAST_CPU is None:
             LAST_CPU = (idle, total)
+            CPU_EMA = 6.0
             return 6
         d_idle = idle - LAST_CPU[0]
         d_tot = max(1, total - LAST_CPU[1])
         LAST_CPU = (idle, total)
-        return max(1, min(99, int(round((1.0 - d_idle / d_tot) * 100))))
+        raw = max(1.0, min(99.0, (1.0 - d_idle / d_tot) * 100.0))
+        if CPU_EMA is None:
+            CPU_EMA = raw
+        else:
+            # 0.5s ticks: alpha = 0.25 gives a smooth ~2s moving average (prevents 100ms spikes)
+            CPU_EMA = (0.25 * raw) + (0.75 * CPU_EMA)
+        return max(1, min(99, int(round(CPU_EMA))))
     except Exception:
         return 5
 
@@ -369,8 +377,8 @@ def refresh_ssh_auth_cache():
                 "-u", "dropbear",
                 "-u", "ssh",
                 "-u", "sshd",
-                "--since", "24 hours ago",
-                "-n", "600",
+                "--since", "1 hour ago",
+                "-n", "200",
                 "--no-pager",
                 "-o", "cat",
             ],
@@ -438,7 +446,7 @@ def read_pid_io_bytes(pid: int) -> int:
 
 def scan_ssh_sessions(managed_users: set[str], hap_loop_ips: dict[str, str]):
     auth_refreshed = False
-    if CYCLE_TICK == 1 or (CYCLE_TICK % 4 == 0):
+    if CYCLE_TICK == 1 or (CYCLE_TICK % 6 == 0):
         refresh_ssh_auth_cache()
         auth_refreshed = True
 
@@ -841,7 +849,7 @@ def enforce_cycle():
     HIST["rx"] = (HIST["rx"] + [round((rx_bps * 8) / 1048576.0, 2)])[-20:]
     HIST["tx"] = (HIST["tx"] + [round((tx_bps * 8) / 1048576.0, 2)])[-20:]
 
-    if not CACHED_SERVICES or (CYCLE_TICK % 12 == 0):
+    if not CACHED_SERVICES or (CYCLE_TICK % 20 == 0):
         CACHED_SERVICES = collect_services_fast()
 
     ssh_live = {}
